@@ -1,16 +1,7 @@
-const sessions = new Map();
+// Session store — Cloudflare KV backed
+// All functions take `kv` (the SESSIONS KV binding) as first param
 
-export async function getSession(keyHash) {
-  return sessions.get(keyHash);
-}
-
-export async function saveSession(keyHash, entry) {
-  sessions.set(keyHash, entry);
-}
-
-export async function deleteSession(keyHash) {
-  sessions.delete(keyHash);
-}
+const TTL = 30 * 24 * 60 * 60; // 30 days in seconds
 
 export async function hashKey(key) {
   const encoder = new TextEncoder();
@@ -20,22 +11,15 @@ export async function hashKey(key) {
   return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function hasSESSIONS() {
-  return typeof SESSIONS !== "undefined";
-}
-
-export async function getSessionKV(keyHash) {
-  if (!hasSESSIONS()) return null;
-  const value = await SESSIONS.get(`session:${keyHash}`);
+export async function getSession(kv, keyHash) {
+  const value = await kv.get(`session:${keyHash}`);
   return value ? JSON.parse(value) : null;
 }
 
-export async function saveSessionKV(keyHash, entry) {
-  if (!hasSESSIONS()) return;
-  await SESSIONS.put(`session:${keyHash}`, JSON.stringify(entry), { expirationTtl: 30 * 24 * 60 * 60 });
+export async function saveSession(kv, keyHash, entry) {
+  await kv.put(`session:${keyHash}`, JSON.stringify(entry), { expirationTtl: TTL });
 }
 
-export async function deleteSessionKV(keyHash) {
-  if (!hasSESSIONS()) return;
-  await SESSIONS.delete(`session:${keyHash}`);
+export async function deleteSession(kv, keyHash) {
+  await kv.delete(`session:${keyHash}`);
 }

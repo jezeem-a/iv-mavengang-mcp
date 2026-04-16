@@ -1,11 +1,12 @@
 name = "iv-mavengang-mcp"
 main = "index.js"
 compatibility_date = "2024-04-15"
-compatibility_flags = ["experimental:webSocket"]
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 BASE_URL = "https://mavengang.com/v1"
 
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "3ccf96101fde4261a114beecef91987c"
+preview_id = "86ef0e58247a4f2c9adeeead5dbbec51"

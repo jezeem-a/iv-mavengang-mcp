@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Read(//Users/incrediblevisibility/.claude/**)",
-      "mcp__mavengang__list_projects"
+      "mcp__mavengang__list_projects",
+      "Bash(npm install:*)"
     ]
   }
 }

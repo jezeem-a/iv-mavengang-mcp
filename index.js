@@ -1,506 +1,58 @@
-import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
-import axios from "axios";
-import z from "zod";
+import { McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod";
+import { hashKey, getSession, saveSession, deleteSession } from "./session-store.js";
 
-const BASE_URL = process.env.BASE_URL || "https://mavengang.com/v1";
-const PORT = parseInt(process.env.PORT || "3001");
+// --- Helper: call MavenGang API using native fetch ---
 
-const api = axios.create({
-  baseURL: BASE_URL,
-  headers: { "Content-Type": "application/json" }
-});
-
-const sessions = new Map();
-
-async function hashKey(key) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(key);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-function getSession(keyHash) {
-  return sessions.get(keyHash);
-}
-
-function saveSession(keyHash, entry) {
-  sessions.set(keyHash, entry);
-}
-
-function deleteSession(keyHash) {
-  sessions.delete(keyHash);
-}
-
-async function loginToMavenGang(email, password) {
-  const res = await api.post("/auth/login", { email, password });
-  return res.data;
-}
-
-async function getMe(accessToken) {
-  const res = await api.get("/auth/me", {
-    headers: { Authorization: `Bearer ${accessToken}` }
+async function mgFetch(path, options = {}, env) {
+  const baseUrl = env.BASE_URL || "https://mavengang.com/v1";
+  const url = `${baseUrl}${path}`;
+  const headers = {
+    "Content-Type": "application/json",
+    ...options.headers
+  };
+  const res = await fetch(url, {
+    method: options.method || "GET",
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined
   });
-  return res.data;
+  if (!res.ok) {
+    const err = new Error(`MavenGang API error: ${res.status}`);
+    err.status = res.status;
+    try { err.data = await res.json(); } catch {}
+    throw err;
+  }
+  return res.json();
 }
 
-async function refreshToken(refreshToken) {
-  const res = await api.post("/auth/refresh", { refreshToken });
-  return res.data;
+function authHeaders(token) {
+  return { Authorization: `Bearer ${token}` };
 }
 
-function createErrorResponse(code, message, status = 400) {
+// --- Error response helper ---
+
+function errorResponse(code, message, status = 400) {
   return new Response(JSON.stringify({ error: { code, message } }), {
     status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, x-session-key, Mcp-Session-Id" }
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, x-session-key, Mcp-Session-Id"
+    }
   });
 }
 
-const loginPage = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Maven Gang - Login</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-    .container { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 100%; max-width: 420px; }
-    h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #333; }
-    .error { background: #fee; color: #c00; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; display: none; }
-    .error.show { display: block; }
-    label { display: block; margin-bottom: 0.5rem; color: #555; font-size: 0.875rem; }
-    input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 1rem; font-size: 1rem; }
-    input:focus { outline: none; border-color: #007bff; }
-    button { width: 100%; padding: 0.75rem; background: #007bff; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; }
-    button:hover { background: #0056b3; }
-    .success { display: none; }
-    .success.show { display: block; }
-    .success h2 { color: #28a745; font-size: 1.25rem; margin-bottom: 1rem; }
-    pre { background: #f8f8f8; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.875rem; margin-bottom: 1rem; }
-    .copy-btn { padding: 0.5rem 1rem; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 1.5rem; }
-    .copy-btn:hover { background: #218838; }
-    table { width: 100%; font-size: 0.875rem; border-collapse: collapse; }
-    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
-    th { color: #555; }
-    .note { margin-top: 1.5rem; color: #666; font-size: 0.875rem; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div id="login-form">
-      <h1>Maven Gang Login</h1>
-      <div class="error" id="error"></div>
-      <label>Email</label>
-      <input type="email" id="email" required>
-      <label>Password</label>
-      <input type="password" id="password" required>
-      <button type="submit" form="login-form" onclick="doLogin()">Login</button>
-    </div>
-    <div class="success" id="success">
-      <h2>Logged In</h2>
-      <pre id="config-json"></pre>
-      <button class="copy-btn" onclick="copyConfig()">Copy Config</button>
-      <table>
-        <tr><th>Tool</th><th>Config File</th></tr>
-        <tr><td>Claude Code</td><td>~/.claude/claude_desktop_config.json</td></tr>
-        <tr><td>Cursor</td><td>~/.cursor/mcp.json</td></tr>
-        <tr><td>opencode</td><td>~/.config/opencode/config.json</td></tr>
-        <tr><td>Windsurf</td><td>~/.codeium/windsurf/mcp_config.json</td></tr>
-      </table>
-      <p class="note">Paste the JSON into your IDE's config file and restart.</p>
-    </div>
-  </div>
-  <script>
-    const SERVER_URL = window.location.origin;
-    async function doLogin() {
-      const email = document.getElementById('email').value;
-      const password = document.getElementById('password').value;
-      const error = document.getElementById('error');
-      error.classList.remove('show');
-      try {
-        const res = await fetch('/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          error.textContent = data.error?.message || 'Login failed';
-          error.classList.add('show');
-          return;
-        }
-        document.getElementById('login-form').style.display = 'none';
-        document.getElementById('success').classList.add('show');
-        document.getElementById('config-json').textContent = JSON.stringify({
-          mcpServers: {
-            mavengang: {
-              url: SERVER_URL + '/mcp',
-              headers: { 'x-session-key': data.session_key }
-            }
-          }
-        }, null, 2);
-      } catch (e) {
-        error.textContent = 'Network error';
-        error.classList.add('show');
-      }
-    }
-    function copyConfig() {
-      const text = document.getElementById('config-json').textContent;
-      navigator.clipboard.writeText(text);
-      document.querySelector('.copy-btn').textContent = 'Copied!';
-      setTimeout(() => document.querySelector('.copy-btn').textContent = 'Copy Config', 2000);
-    }
-  </script>
-</body>
-</html>`;
+// --- CORS preflight ---
 
-const server = new McpServer({
-  name: "mavengang",
-  version: "1.0.0",
-  description: "Maven Gang Project Management API"
-});
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, x-session-key, Mcp-Session-Id",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
+  };
+}
 
-server.registerTool(
-  "list_projects",
-  {
-    title: "List Projects",
-    description: "List all projects in your Maven Gang account.",
-    inputSchema: z.object({})
-  },
-  async (_, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const res = await api.get(`/agencies/${session.agency_id}/projects`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const projects = res.data.items.map(p => ({
-      id: p.id,
-      name: p.name,
-      key: p.key,
-      status: p.status,
-      client: p.clients?.[0]?.name || "No client",
-      category: p.category_name,
-      taskTotal: p.task_total,
-      taskCompleted: p.task_completed
-    }));
-    return {
-      content: [{ type: "text", text: JSON.stringify(projects, null, 2) }],
-      structuredContent: { projects }
-    };
-  }
-);
-
-server.registerTool(
-  "get_project",
-  {
-    title: "Get Project",
-    description: "Get details of a single project.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects")
-    })
-  },
-  async ({ projectId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const res = await api.get(`/agencies/${session.agency_id}/projects/${projectId}`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
-      structuredContent: res.data
-    };
-  }
-);
-
-server.registerTool(
-  "list_tasks",
-  {
-    title: "List Tasks",
-    description: "List tasks in a project.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects"),
-      status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Filter by status").optional(),
-      parentId: z.string().describe("Parent task ID for subtasks").optional()
-    })
-  },
-  async ({ projectId, status, parentId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const params = new URLSearchParams();
-    if (status) params.append("status", status);
-    if (parentId) params.append("parent_id", parentId);
-    const query = params.toString() ? "?" + params.toString() : "";
-    
-    const res = await api.get(`/agencies/${session.agency_id}/projects/${projectId}/tasks${query}`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const tasks = res.data.items.map(t => ({
-      id: t.id,
-      taskNumber: t.task_number,
-      title: t.title,
-      description: t.description || "",
-      status: t.status_name || t.status,
-      priority: t.priority,
-      assignedTo: t.assigned_user?.first_name + " " + t.assigned_user?.last_name || "Unassigned",
-      isSubtask: !!t.parent_id,
-      dueDate: t.due_date
-    }));
-    return {
-      content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }],
-      structuredContent: { tasks }
-    };
-  }
-);
-
-server.registerTool(
-  "get_task",
-  {
-    title: "Get Task",
-    description: "Get full details of a single task.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects"),
-      taskId: z.string().describe("Task ID from list_tasks")
-    })
-  },
-  async ({ projectId, taskId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const res = await api.get(`/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
-      structuredContent: res.data
-    };
-  }
-);
-
-server.registerTool(
-  "create_task",
-  {
-    title: "Create Task",
-    description: "Create a new task or subtask.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects"),
-      title: z.string().describe("Task title"),
-      description: z.string().describe("Task description").optional(),
-      parentId: z.string().describe("Parent task ID for subtask").optional(),
-      assignedUserId: z.string().describe("User ID to assign").optional(),
-      priority: z.number().describe("Priority: 0=none, 1=low, 2=medium, 3=high").optional(),
-      dueDate: z.string().describe("Due date ISO format").optional(),
-      status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Status").optional()
-    })
-  },
-  async ({ projectId, title, description, parentId, assignedUserId, priority, dueDate, status }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const body = { title };
-    if (description) body.description = description;
-    if (parentId) body.parent_id = parentId;
-    if (assignedUserId) body.assigned_user_id = assignedUserId;
-    if (priority !== undefined) body.priority = priority;
-    if (dueDate) body.due_date = dueDate;
-    if (status) body.status = status;
-    
-    const res = await api.post(`/agencies/${session.agency_id}/projects/${projectId}/tasks`, body, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const task = res.data.task;
-    return {
-      content: [{
-        type: "text",
-        text: `Task created: ${task.task_number} - "${task.title}"\nStatus: ${task.status_name}\nAssigned: ${task.assigned_user?.first_name || "Unassigned"}\nView: https://mavengang.com/projects/${projectId}/tasks/${task.id}`
-      }],
-      structuredContent: task
-    };
-  }
-);
-
-server.registerTool(
-  "update_task",
-  {
-    title: "Update Task",
-    description: "Update task status, assignee, priority, title, or due date.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects"),
-      taskId: z.string().describe("Task ID from list_tasks"),
-      title: z.string().describe("Task title").optional(),
-      status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Status").optional(),
-      assignedUserId: z.string().describe("User ID to assign").optional(),
-      priority: z.number().describe("Priority level").optional(),
-      dueDate: z.string().describe("Due date ISO format").optional()
-    })
-  },
-  async ({ projectId, taskId, title, status, assignedUserId, priority, dueDate }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const body = {};
-    if (title) body.title = title;
-    if (status) body.status = status;
-    if (assignedUserId) body.assigned_user_id = assignedUserId;
-    if (priority !== undefined) body.priority = priority;
-    if (dueDate) body.due_date = dueDate;
-    
-    const res = await api.patch(`/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, body, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
-      structuredContent: res.data
-    };
-  }
-);
-
-server.registerTool(
-  "list_project_members",
-  {
-    title: "List Project Members",
-    description: "List members of a project.",
-    inputSchema: z.object({
-      projectId: z.string().describe("Project ID from list_projects")
-    })
-  },
-  async ({ projectId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const res = await api.get(`/agencies/${session.agency_id}/projects/${projectId}/members`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const members = res.data.items.map(m => ({
-      userId: m.user_id,
-      firstName: m.first_name,
-      lastName: m.last_name,
-      role: m.role
-    }));
-    return {
-      content: [{ type: "text", text: JSON.stringify(members, null, 2) }],
-      structuredContent: { members }
-    };
-  }
-);
-
-server.registerTool(
-  "get_my_tasks",
-  {
-    title: "Get My Tasks",
-    description: "Get all tasks assigned to the current user.",
-    inputSchema: z.object({
-      status: z.string().describe("Filter by status: todo,in_progress").optional(),
-      sort: z.enum(["due_date", "priority", "created_at"]).describe("Sort by").optional(),
-      limit: z.number().describe("Limit (default 20)").optional()
-    })
-  },
-  async ({ status, sort, limit }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const params = new URLSearchParams();
-    if (status) params.append("status", status);
-    if (sort) params.append("sort", sort);
-    if (limit) params.append("limit", limit.toString());
-    const query = params.toString() ? "?" + params.toString() : "";
-    
-    const res = await api.get(`/agencies/${session.agency_id}/my-tasks${query}`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const tasks = res.data.items.map(t => ({
-      taskNumber: t.task_number,
-      title: t.title,
-      status: t.status_name || t.status,
-      priority: t.priority,
-      dueDate: t.due_date,
-      projectId: t.project_id,
-      projectName: t.project_name
-    }));
-    return {
-      content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }],
-      structuredContent: { tasks }
-    };
-  }
-);
-
-server.registerTool(
-  "add_comment",
-  {
-    title: "Add Comment",
-    description: "Add a comment to a task.",
-    inputSchema: z.object({
-      taskId: z.string().describe("Task ID from list_tasks"),
-      content: z.string().describe("Comment content"),
-      parentId: z.string().describe("Parent comment ID for replies").optional()
-    })
-  },
-  async ({ taskId, content, parentId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const body = {
-      entity_type: "task",
-      entity_id: taskId,
-      content,
-      parent_id: parentId || null
-    };
-    
-    const res = await api.post(`/agencies/${session.agency_id}/comments`, body, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    return {
-      content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
-      structuredContent: res.data
-    };
-  }
-);
-
-server.registerTool(
-  "list_comments",
-  {
-    title: "List Comments",
-    description: "List comments on a task.",
-    inputSchema: z.object({
-      taskId: z.string().describe("Task ID from list_tasks")
-    })
-  },
-  async ({ taskId }, sessionKey) => {
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    if (!session) throw new Error("SESSION_INVALID: Please re-login");
-    
-    const params = new URLSearchParams();
-    params.append("entity_type", "task");
-    params.append("entity_id", taskId);
-    
-    const res = await api.get(`/agencies/${session.agency_id}/comments?${params}`, {
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-    const comments = res.data.items.map(c => ({
-      id: c.id,
-      content: c.content,
-      author: c.author?.first_name + " " + c.author?.last_name || "Unknown",
-      createdAt: c.created_at,
-      parentId: c.parent_id
-    }));
-    return {
-      content: [{ type: "text", text: JSON.stringify(comments, null, 2) }],
-      structuredContent: { comments }
-    };
-  }
-);
+// --- Rate limiting (in-memory per worker instance, best-effort) ---
 
 const rateLimitMap = new Map();
 
@@ -516,149 +68,549 @@ function checkRateLimit(ip) {
   return true;
 }
 
-async function handleLogin(req) {
-  const clientIp = req.headers.get("cf-connecting-ip") || req.headers.get("x-forwarded-for") || "unknown";
-  
+// --- Login page HTML ---
+
+const loginPage = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maven Gang - Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .container { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 100%; max-width: 420px; }
+    h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #333; }
+    .error { background: #fee; color: #c00; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; display: none; }
+    .error.show { display: block; }
+    label { display: block; margin-bottom: 0.5rem; color: #555; font-size: 0.875rem; }
+    input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 1rem; font-size: 1rem; }
+    input:focus { outline: none; border-color: #007bff; }
+    button { width: 100%; padding: 0.75rem; background: #007bff; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .success { display: none; }
+    .success.show { display: block; }
+    .success h2 { color: #28a745; font-size: 1.25rem; margin-bottom: 1rem; }
+    pre { background: #f8f8f8; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.875rem; margin-bottom: 1rem; }
+    .copy-btn { padding: 0.5rem 1rem; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 1.5rem; width: auto; }
+    .copy-btn:hover { background: #218838; }
+    table { width: 100%; font-size: 0.875rem; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
+    th { color: #555; }
+    td code { background: #f0f0f0; padding: 2px 4px; border-radius: 2px; font-size: 0.8rem; }
+    .note { margin-top: 1.5rem; color: #666; font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="login-form">
+      <h1>Maven Gang Login</h1>
+      <div class="error" id="error"></div>
+      <label>Email</label>
+      <input type="email" id="email" required>
+      <label>Password</label>
+      <input type="password" id="password" required>
+      <button id="login-btn" onclick="doLogin()">Login</button>
+    </div>
+    <div class="success" id="success">
+      <h2>&#10003; Logged In</h2>
+      <p style="margin-bottom:1rem;color:#555;">Copy this config into your IDE:</p>
+      <pre id="config-json"></pre>
+      <button class="copy-btn" onclick="copyConfig()">Copy Config</button>
+      <table>
+        <tr><th>Tool</th><th>Config File</th></tr>
+        <tr><td>Claude Code</td><td><code>~/.claude/claude_desktop_config.json</code></td></tr>
+        <tr><td>Cursor</td><td><code>~/.cursor/mcp.json</code></td></tr>
+        <tr><td>opencode</td><td><code>~/.config/opencode/config.json</code></td></tr>
+        <tr><td>Windsurf</td><td><code>~/.codeium/windsurf/mcp_config.json</code></td></tr>
+        <tr><td>VS Code (Copilot)</td><td><code>.vscode/mcp.json</code> in workspace</td></tr>
+      </table>
+      <p class="note">Paste the JSON into your IDE's config file, restart your IDE. Done.</p>
+    </div>
+  </div>
+  <script>
+    async function doLogin() {
+      const btn = document.getElementById('login-btn');
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const error = document.getElementById('error');
+      error.classList.remove('show');
+      btn.disabled = true;
+      btn.textContent = 'Logging in...';
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          error.textContent = data.error?.message || 'Login failed';
+          error.classList.add('show');
+          btn.disabled = false;
+          btn.textContent = 'Login';
+          return;
+        }
+        document.getElementById('login-form').style.display = 'none';
+        document.getElementById('success').classList.add('show');
+        document.getElementById('config-json').textContent = JSON.stringify({
+          mcpServers: {
+            mavengang: {
+              url: window.location.origin + '/mcp',
+              headers: { 'x-session-key': data.session_key }
+            }
+          }
+        }, null, 2);
+      } catch (e) {
+        error.textContent = 'Network error. Please try again.';
+        error.classList.add('show');
+        btn.disabled = false;
+        btn.textContent = 'Login';
+      }
+    }
+    function copyConfig() {
+      const text = document.getElementById('config-json').textContent;
+      navigator.clipboard.writeText(text);
+      const btn = document.querySelector('.copy-btn');
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy Config', 2000);
+    }
+    // Allow Enter key to submit
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && document.getElementById('login-form').style.display !== 'none') {
+        doLogin();
+      }
+    });
+  </script>
+</body>
+</html>`;
+
+// --- Build MCP server with all 10 tools ---
+
+function createMcpServer() {
+  const server = new McpServer({
+    name: "mavengang",
+    version: "1.0.0",
+    description: "Maven Gang Project Management API"
+  });
+
+  // Helper: get session or throw
+  async function requireSession(kv, sessionKey) {
+    if (!sessionKey) throw new Error("SESSION_INVALID");
+    const keyHash = await hashKey(sessionKey);
+    const session = await getSession(kv, keyHash);
+    if (!session) throw new Error("SESSION_INVALID");
+    return { session, keyHash };
+  }
+
+  // Helper: make authenticated API call with auto-refresh
+  async function apiCall(kv, session, keyHash, method, path, body, env) {
+    try {
+      return await mgFetch(path, {
+        method,
+        headers: authHeaders(session.access_token),
+        body
+      }, env);
+    } catch (err) {
+      if (err.status === 401) {
+        // Try refresh
+        try {
+          const refreshed = await mgFetch("/auth/refresh", {
+            method: "POST",
+            body: { refreshToken: session.refresh_token }
+          }, env);
+          session.access_token = refreshed.access_token;
+          session.refresh_token = refreshed.refresh_token;
+          await saveSession(kv, keyHash, session);
+          // Retry
+          return await mgFetch(path, {
+            method,
+            headers: authHeaders(session.access_token),
+            body
+          }, env);
+        } catch {
+          await deleteSession(kv, keyHash);
+          throw new Error("MAVENGANG_AUTH_FAILED");
+        }
+      }
+      throw err;
+    }
+  }
+
+  // 1. list_projects
+  server.registerTool(
+    "list_projects",
+    {
+      title: "List Projects",
+      description: "List all projects in your Maven Gang account.",
+      inputSchema: z.object({})
+    },
+    async (params, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects`, null, env);
+      const projects = res.items.map(p => ({
+        id: p.id, name: p.name, key: p.key, status: p.status,
+        client: p.clients?.[0]?.name || "No client",
+        category: p.category_name,
+        taskTotal: p.task_total, taskCompleted: p.task_completed
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(projects, null, 2) }] };
+    }
+  );
+
+  // 2. get_project
+  server.registerTool(
+    "get_project",
+    {
+      title: "Get Project",
+      description: "Get details of a single project.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects")
+      })
+    },
+    async ({ projectId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}`, null, env);
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    }
+  );
+
+  // 3. list_tasks
+  server.registerTool(
+    "list_tasks",
+    {
+      title: "List Tasks",
+      description: "List tasks in a project. Pass parentId to get subtasks.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects"),
+        status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Filter by status").optional(),
+        parentId: z.string().describe("Parent task ID for subtasks").optional()
+      })
+    },
+    async ({ projectId, status, parentId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const params = new URLSearchParams();
+      if (status) params.append("status", status);
+      if (parentId) params.append("parent_id", parentId);
+      const query = params.toString() ? "?" + params.toString() : "";
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks${query}`, null, env);
+      const tasks = res.items.map(t => ({
+        id: t.id, taskNumber: t.task_number, title: t.title,
+        description: t.description || "",
+        status: t.status_name || t.status, priority: t.priority,
+        assignedTo: t.assigned_user ? `${t.assigned_user.first_name} ${t.assigned_user.last_name}` : "Unassigned",
+        isSubtask: !!t.parent_id, dueDate: t.due_date
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
+    }
+  );
+
+  // 4. get_task
+  server.registerTool(
+    "get_task",
+    {
+      title: "Get Task",
+      description: "Get full details of a single task.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects"),
+        taskId: z.string().describe("Task ID from list_tasks")
+      })
+    },
+    async ({ projectId, taskId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, null, env);
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    }
+  );
+
+  // 5. create_task
+  server.registerTool(
+    "create_task",
+    {
+      title: "Create Task",
+      description: "Create a new task or subtask.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects"),
+        title: z.string().describe("Task title"),
+        description: z.string().describe("Task description").optional(),
+        parentId: z.string().describe("Parent task ID for subtask").optional(),
+        assignedUserId: z.string().describe("User ID to assign").optional(),
+        priority: z.number().describe("Priority: 0=none, 1=low, 2=medium, 3=high").optional(),
+        dueDate: z.string().describe("Due date ISO format").optional(),
+        status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Status").optional()
+      })
+    },
+    async ({ projectId, title, description, parentId, assignedUserId, priority, dueDate, status }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const body = { title };
+      if (description) body.description = description;
+      if (parentId) body.parent_id = parentId;
+      if (assignedUserId) body.assigned_user_id = assignedUserId;
+      if (priority !== undefined) body.priority = priority;
+      if (dueDate) body.due_date = dueDate;
+      if (status) body.status = status;
+      const res = await apiCall(kv, session, keyHash, "POST", `/agencies/${session.agency_id}/projects/${projectId}/tasks`, body, env);
+      const task = res.task;
+      return {
+        content: [{
+          type: "text",
+          text: `Task created: ${task.task_number} - "${task.title}"\nStatus: ${task.status_name}\nAssigned: ${task.assigned_user?.first_name || "Unassigned"}`
+        }]
+      };
+    }
+  );
+
+  // 6. update_task
+  server.registerTool(
+    "update_task",
+    {
+      title: "Update Task",
+      description: "Update task status, assignee, priority, title, or due date.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects"),
+        taskId: z.string().describe("Task ID from list_tasks"),
+        title: z.string().describe("Task title").optional(),
+        status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Status").optional(),
+        assignedUserId: z.string().describe("User ID to assign").optional(),
+        priority: z.number().describe("Priority level").optional(),
+        dueDate: z.string().describe("Due date ISO format").optional()
+      })
+    },
+    async ({ projectId, taskId, title, status, assignedUserId, priority, dueDate }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const body = {};
+      if (title) body.title = title;
+      if (status) body.status = status;
+      if (assignedUserId) body.assigned_user_id = assignedUserId;
+      if (priority !== undefined) body.priority = priority;
+      if (dueDate) body.due_date = dueDate;
+      const res = await apiCall(kv, session, keyHash, "PATCH", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, body, env);
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    }
+  );
+
+  // 7. list_project_members
+  server.registerTool(
+    "list_project_members",
+    {
+      title: "List Project Members",
+      description: "List members of a project with user IDs for assignment.",
+      inputSchema: z.object({
+        projectId: z.string().describe("Project ID from list_projects")
+      })
+    },
+    async ({ projectId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/members`, null, env);
+      const members = (res.items || res).map(m => ({
+        userId: m.user_id, firstName: m.first_name, lastName: m.last_name, role: m.role
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
+    }
+  );
+
+  // 8. get_my_tasks
+  server.registerTool(
+    "get_my_tasks",
+    {
+      title: "Get My Tasks",
+      description: "Get all tasks assigned to current user across all projects.",
+      inputSchema: z.object({
+        status: z.string().describe("Filter by status: todo,in_progress").optional(),
+        sort: z.enum(["due_date", "priority", "created_at"]).describe("Sort by").optional(),
+        limit: z.number().describe("Limit (default 20, max 100)").optional()
+      })
+    },
+    async ({ status, sort, limit }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const params = new URLSearchParams();
+      if (status) params.append("status", status);
+      if (sort) params.append("sort", sort);
+      if (limit) params.append("limit", limit.toString());
+      const query = params.toString() ? "?" + params.toString() : "";
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/my-tasks${query}`, null, env);
+      const tasks = res.items.map(t => ({
+        taskNumber: t.task_number, title: t.title,
+        status: t.status_name || t.status, priority: t.priority,
+        dueDate: t.due_date, projectId: t.project_id, projectName: t.project_name
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
+    }
+  );
+
+  // 9. add_comment
+  server.registerTool(
+    "add_comment",
+    {
+      title: "Add Comment",
+      description: "Add a comment to a task.",
+      inputSchema: z.object({
+        taskId: z.string().describe("Task ID"),
+        content: z.string().describe("Comment content"),
+        parentId: z.string().describe("Parent comment ID for replies").optional()
+      })
+    },
+    async ({ taskId, content, parentId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const body = { entity_type: "task", entity_id: taskId, content, parent_id: parentId || null };
+      const res = await apiCall(kv, session, keyHash, "POST", `/agencies/${session.agency_id}/comments`, body, env);
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    }
+  );
+
+  // 10. list_comments
+  server.registerTool(
+    "list_comments",
+    {
+      title: "List Comments",
+      description: "List comments on a task.",
+      inputSchema: z.object({
+        taskId: z.string().describe("Task ID")
+      })
+    },
+    async ({ taskId }, extra) => {
+      const { kv, env, sessionKey } = extra;
+      const { session, keyHash } = await requireSession(kv, sessionKey);
+      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/comments?entity_type=task&entity_id=${taskId}`, null, env);
+      const comments = (res.items || []).map(c => ({
+        id: c.id, content: c.content,
+        author: c.author ? `${c.author.first_name} ${c.author.last_name}` : "Unknown",
+        createdAt: c.created_at, parentId: c.parent_id
+      }));
+      return { content: [{ type: "text", text: JSON.stringify(comments, null, 2) }] };
+    }
+  );
+
+  return server;
+}
+
+// --- Login handler ---
+
+async function handleLogin(request, env) {
+  const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "unknown";
+
   if (!checkRateLimit(clientIp)) {
-    return createErrorResponse("RATE_LIMITED", "Too many attempts. Try again in 15 minutes.", 429);
+    return errorResponse("RATE_LIMITED", "Too many attempts. Try again in 15 minutes.", 429);
   }
 
   let body;
   try {
-    const decoder = new TextDecoder();
-    body = JSON.parse(decoder.decode(req.body));
+    body = await request.json();
   } catch {
-    return createErrorResponse("VALIDATION_ERROR", "Invalid JSON body", 400);
+    return errorResponse("VALIDATION_ERROR", "Invalid JSON body", 400);
   }
 
   const { email, password } = body;
   if (!email || !password) {
-    return createErrorResponse("VALIDATION_ERROR", "Email and password required", 400);
+    return errorResponse("VALIDATION_ERROR", "Email and password required", 400);
   }
 
   try {
-    const loginRes = await loginToMavenGang(email, password);
-    const meRes = await getMe(loginRes.access_token);
+    const loginRes = await mgFetch("/auth/login", { method: "POST", body: { email, password } }, env);
+    const meRes = await mgFetch("/auth/me", { headers: authHeaders(loginRes.access_token) }, env);
     const agencyId = meRes.memberships[0].agency_id;
     const agencyName = meRes.memberships[0].agency_name;
 
     const sessionKey = crypto.randomUUID();
-    const entry = {
+    const keyHash = await hashKey(sessionKey);
+    await saveSession(env.SESSIONS, keyHash, {
       access_token: loginRes.access_token,
       refresh_token: loginRes.refresh_token,
       agency_id: agencyId,
       email
-    };
-    const keyHash = await hashKey(sessionKey);
-    saveSession(keyHash, entry);
+    });
 
     return new Response(JSON.stringify({
       session_key: sessionKey,
       email,
       agency_name: agencyName
     }), {
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json", ...corsHeaders() }
     });
   } catch (err) {
-    return createErrorResponse("INVALID_CREDENTIALS", "Wrong email or password", 401);
+    return errorResponse("INVALID_CREDENTIALS", "Wrong email or password", 401);
   }
 }
 
-const transport = new WebStandardStreamableHTTPServerTransport({
-  sessionIdGenerator: () => crypto.randomUUID()
-});
+// --- Cloudflare Workers entry point ---
 
-async function handleMcpRequest(req, sessionKey) {
-  if (!sessionKey) {
-    return createErrorResponse("SESSION_INVALID", "Missing x-session-key header", 401);
-  }
-  
-  const keyHash = await hashKey(sessionKey);
-  const session = getSession(keyHash);
-  
-  if (!session) {
-    return createErrorResponse("SESSION_INVALID", "Session expired. Please re-login.", 401);
-  }
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
 
-  const authMiddleware = async (request) => {
-    try {
-      const response = await transport.handleRequest(request);
-      return response;
-    } catch (err) {
-      if (err.message?.includes("401") || err.response?.status === 401) {
-        try {
-          const refreshed = await refreshToken(session.refresh_token);
-          session.access_token = refreshed.access_token;
-          session.refresh_token = refreshed.refresh_token;
-          saveSession(keyHash, session);
-          
-          const retryRes = await api.get(`/agencies/${session.agency_id}/projects`, {
-            headers: { Authorization: `Bearer ${session.access_token}` }
-          });
-          return retryRes;
-        } catch {
-          deleteSession(keyHash);
-          return createErrorResponse("MAVENGANG_AUTH_FAILED", "Session expired. Please re-login.", 401);
-        }
+    // CORS preflight
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    // Login page
+    if (path === "/login" && method === "GET") {
+      return new Response(loginPage, {
+        headers: { "Content-Type": "text/html", ...corsHeaders() }
+      });
+    }
+
+    // Login API
+    if (path === "/login" && method === "POST") {
+      return handleLogin(request, env);
+    }
+
+    // Logout
+    if (path === "/logout" && method === "POST") {
+      const sessionKey = request.headers.get("x-session-key");
+      if (sessionKey) {
+        const keyHash = await hashKey(sessionKey);
+        await deleteSession(env.SESSIONS, keyHash);
       }
-      throw err;
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders() }
+      });
     }
-  };
-  
-  return transport.handleRequest(req);
-}
 
-await server.connect(transport);
+    // Health check
+    if (path === "/" && method === "GET") {
+      return new Response(JSON.stringify({ status: "ok", service: "iv-mavengang-mcp" }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
-async function handleRequest(req) {
-  const url = new URL(req.url);
-  const path = url.pathname;
-  const method = req.method;
-  const sessionKey = req.headers.get("x-session-key");
+    // MCP endpoint
+    if (path === "/mcp" && (method === "POST" || method === "GET")) {
+      const sessionKey = request.headers.get("x-session-key");
+      if (!sessionKey) {
+        return errorResponse("SESSION_INVALID", "Missing x-session-key header", 401);
+      }
 
-  if (path === "/login" && method === "GET") {
-    return new Response(loginPage, {
-      headers: { "Content-Type": "text/html" }
-    });
-  }
-
-  if (path === "/login" && method === "POST") {
-    return handleLogin(req);
-  }
-
-  if (path === "/logout" && method === "POST") {
-    if (sessionKey) {
       const keyHash = await hashKey(sessionKey);
-      deleteSession(keyHash);
+      const session = await getSession(env.SESSIONS, keyHash);
+      if (!session) {
+        return errorResponse("SESSION_INVALID", "Session expired. Please re-login.", 401);
+      }
+
+      // Create server + transport per request (Workers are stateless)
+      const server = createMcpServer();
+
+      // TODO: Wire up MCP StreamableHTTP transport here
+      // The exact integration depends on the MCP SDK version's Workers support.
+      // For now, return a placeholder so the rest of the server deploys and /login works.
+      return new Response(JSON.stringify({ error: { code: "NOT_IMPLEMENTED", message: "MCP transport integration in progress" } }), {
+        status: 501,
+        headers: { "Content-Type": "application/json", ...corsHeaders() }
+      });
     }
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "Content-Type": "application/json" }
-    });
+
+    return new Response("Not Found", { status: 404, headers: corsHeaders() });
   }
-
-  if (path === "/mcp" && (method === "POST" || method === "GET")) {
-    if (!sessionKey) {
-      return createErrorResponse("SESSION_INVALID", "Missing x-session-key header", 401);
-    }
-    
-    const keyHash = await hashKey(sessionKey);
-    const session = getSession(keyHash);
-    
-    if (!session) {
-      return createErrorResponse("SESSION_INVALID", "Session expired. Please re-login.", 401);
-    }
-
-    req.headers.set("x-session-key", sessionKey);
-    return transport.handleRequest(req);
-  }
-
-  return new Response("Not Found", { status: 404 });
-}
-
-if (typeof self !== "undefined" && self.addEventListener) {
-  self.addEventListener("fetch", (event) => {
-    event.respondWith(handleRequest(event.request));
-  });
-}
-
-export { handleRequest, server };
+};

@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { hashKey, getSession, saveSession, deleteSession } from "./session-store.js";
 
@@ -187,34 +187,21 @@ const loginPage = `<!DOCTYPE html>
 </html>`;
 
 // --- Build MCP server with all 10 tools ---
+// Context (kv, env, sessionKey, session, keyHash) passed via closure, not extra
 
-function createMcpServer() {
+function createMcpServer({ kv, env, session, keyHash }) {
   const server = new McpServer({
     name: "mavengang",
     version: "1.0.0",
     description: "Maven Gang Project Management API"
   });
 
-  // Helper: get session or throw
-  async function requireSession(kv, sessionKey) {
-    if (!sessionKey) throw new Error("SESSION_INVALID");
-    const keyHash = await hashKey(sessionKey);
-    const session = await getSession(kv, keyHash);
-    if (!session) throw new Error("SESSION_INVALID");
-    return { session, keyHash };
-  }
-
-  // Helper: make authenticated API call with auto-refresh
-  async function apiCall(kv, session, keyHash, method, path, body, env) {
+  // Helper: make authenticated API call with auto-refresh (uses closure vars)
+  async function apiCall(method, path, body) {
     try {
-      return await mgFetch(path, {
-        method,
-        headers: authHeaders(session.access_token),
-        body
-      }, env);
+      return await mgFetch(path, { method, headers: authHeaders(session.access_token), body }, env);
     } catch (err) {
       if (err.status === 401) {
-        // Try refresh
         try {
           const refreshed = await mgFetch("/auth/refresh", {
             method: "POST",
@@ -223,12 +210,7 @@ function createMcpServer() {
           session.access_token = refreshed.access_token;
           session.refresh_token = refreshed.refresh_token;
           await saveSession(kv, keyHash, session);
-          // Retry
-          return await mgFetch(path, {
-            method,
-            headers: authHeaders(session.access_token),
-            body
-          }, env);
+          return await mgFetch(path, { method, headers: authHeaders(session.access_token), body }, env);
         } catch {
           await deleteSession(kv, keyHash);
           throw new Error("MAVENGANG_AUTH_FAILED");
@@ -246,10 +228,8 @@ function createMcpServer() {
       description: "List all projects in your Maven Gang account.",
       inputSchema: z.object({})
     },
-    async (params, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects`, null, env);
+    async () => {
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/projects`, null);
       const projects = res.items.map(p => ({
         id: p.id, name: p.name, key: p.key, status: p.status,
         client: p.clients?.[0]?.name || "No client",
@@ -270,10 +250,8 @@ function createMcpServer() {
         projectId: z.string().describe("Project ID from list_projects")
       })
     },
-    async ({ projectId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}`, null, env);
+    async ({ projectId }) => {
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/projects/${projectId}`, null);
       return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
     }
   );
@@ -290,14 +268,12 @@ function createMcpServer() {
         parentId: z.string().describe("Parent task ID for subtasks").optional()
       })
     },
-    async ({ projectId, status, parentId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
+    async ({ projectId, status, parentId }) => {
       const params = new URLSearchParams();
       if (status) params.append("status", status);
       if (parentId) params.append("parent_id", parentId);
       const query = params.toString() ? "?" + params.toString() : "";
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks${query}`, null, env);
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks${query}`, null);
       const tasks = res.items.map(t => ({
         id: t.id, taskNumber: t.task_number, title: t.title,
         description: t.description || "",
@@ -320,10 +296,8 @@ function createMcpServer() {
         taskId: z.string().describe("Task ID from list_tasks")
       })
     },
-    async ({ projectId, taskId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, null, env);
+    async ({ projectId, taskId }) => {
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, null);
       return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
     }
   );
@@ -345,9 +319,7 @@ function createMcpServer() {
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).describe("Status").optional()
       })
     },
-    async ({ projectId, title, description, parentId, assignedUserId, priority, dueDate, status }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
+    async ({ projectId, title, description, parentId, assignedUserId, priority, dueDate, status }) => {
       const body = { title };
       if (description) body.description = description;
       if (parentId) body.parent_id = parentId;
@@ -355,7 +327,7 @@ function createMcpServer() {
       if (priority !== undefined) body.priority = priority;
       if (dueDate) body.due_date = dueDate;
       if (status) body.status = status;
-      const res = await apiCall(kv, session, keyHash, "POST", `/agencies/${session.agency_id}/projects/${projectId}/tasks`, body, env);
+      const res = await apiCall("POST", `/agencies/${session.agency_id}/projects/${projectId}/tasks`, body);
       const task = res.task;
       return {
         content: [{
@@ -382,16 +354,14 @@ function createMcpServer() {
         dueDate: z.string().describe("Due date ISO format").optional()
       })
     },
-    async ({ projectId, taskId, title, status, assignedUserId, priority, dueDate }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
+    async ({ projectId, taskId, title, status, assignedUserId, priority, dueDate }) => {
       const body = {};
       if (title) body.title = title;
       if (status) body.status = status;
       if (assignedUserId) body.assigned_user_id = assignedUserId;
       if (priority !== undefined) body.priority = priority;
       if (dueDate) body.due_date = dueDate;
-      const res = await apiCall(kv, session, keyHash, "PATCH", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, body, env);
+      const res = await apiCall("PATCH", `/agencies/${session.agency_id}/projects/${projectId}/tasks/${taskId}`, body);
       return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
     }
   );
@@ -406,10 +376,8 @@ function createMcpServer() {
         projectId: z.string().describe("Project ID from list_projects")
       })
     },
-    async ({ projectId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/projects/${projectId}/members`, null, env);
+    async ({ projectId }) => {
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/projects/${projectId}/members`, null);
       const members = (res.items || res).map(m => ({
         userId: m.user_id, firstName: m.first_name, lastName: m.last_name, role: m.role
       }));
@@ -429,15 +397,13 @@ function createMcpServer() {
         limit: z.number().describe("Limit (default 20, max 100)").optional()
       })
     },
-    async ({ status, sort, limit }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
+    async ({ status, sort, limit }) => {
       const params = new URLSearchParams();
       if (status) params.append("status", status);
       if (sort) params.append("sort", sort);
       if (limit) params.append("limit", limit.toString());
       const query = params.toString() ? "?" + params.toString() : "";
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/my-tasks${query}`, null, env);
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/my-tasks${query}`, null);
       const tasks = res.items.map(t => ({
         taskNumber: t.task_number, title: t.title,
         status: t.status_name || t.status, priority: t.priority,
@@ -459,11 +425,9 @@ function createMcpServer() {
         parentId: z.string().describe("Parent comment ID for replies").optional()
       })
     },
-    async ({ taskId, content, parentId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
+    async ({ taskId, content, parentId }) => {
       const body = { entity_type: "task", entity_id: taskId, content, parent_id: parentId || null };
-      const res = await apiCall(kv, session, keyHash, "POST", `/agencies/${session.agency_id}/comments`, body, env);
+      const res = await apiCall("POST", `/agencies/${session.agency_id}/comments`, body);
       return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
     }
   );
@@ -478,10 +442,8 @@ function createMcpServer() {
         taskId: z.string().describe("Task ID")
       })
     },
-    async ({ taskId }, extra) => {
-      const { kv, env, sessionKey } = extra;
-      const { session, keyHash } = await requireSession(kv, sessionKey);
-      const res = await apiCall(kv, session, keyHash, "GET", `/agencies/${session.agency_id}/comments?entity_type=task&entity_id=${taskId}`, null, env);
+    async ({ taskId }) => {
+      const res = await apiCall("GET", `/agencies/${session.agency_id}/comments?entity_type=task&entity_id=${taskId}`, null);
       const comments = (res.items || []).map(c => ({
         id: c.id, content: c.content,
         author: c.author ? `${c.author.first_name} ${c.author.last_name}` : "Unknown",
@@ -586,8 +548,8 @@ export default {
       });
     }
 
-    // MCP endpoint
-    if (path === "/mcp" && (method === "POST" || method === "GET")) {
+    // MCP endpoint — stateless per-request (Cloudflare Workers model)
+    if (path === "/mcp") {
       const sessionKey = request.headers.get("x-session-key");
       if (!sessionKey) {
         return errorResponse("SESSION_INVALID", "Missing x-session-key header", 401);
@@ -599,16 +561,16 @@ export default {
         return errorResponse("SESSION_INVALID", "Session expired. Please re-login.", 401);
       }
 
-      // Create server + transport per request (Workers are stateless)
-      const server = createMcpServer();
+      // Create server with session context baked in via closure
+      const server = createMcpServer({ kv: env.SESSIONS, env, session, keyHash });
 
-      // TODO: Wire up MCP StreamableHTTP transport here
-      // The exact integration depends on the MCP SDK version's Workers support.
-      // For now, return a placeholder so the rest of the server deploys and /login works.
-      return new Response(JSON.stringify({ error: { code: "NOT_IMPLEMENTED", message: "MCP transport integration in progress" } }), {
-        status: 501,
-        headers: { "Content-Type": "application/json", ...corsHeaders() }
+      // Stateless transport — no session IDs, new server per request
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined // stateless mode
       });
+
+      await server.connect(transport);
+      return transport.handleRequest(request);
     }
 
     return new Response("Not Found", { status: 404, headers: corsHeaders() });

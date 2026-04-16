@@ -248,8 +248,13 @@ const loginPage = `<!DOCTYPE html>
         for (var j = 0; j < configs.length; j++) {
           configs[j].style.display = 'none';
         }
-        var activeTab = document.querySelector('.ide-tab[onclick="showIde(\'' + ide + '\')"]');
-        if (activeTab) activeTab.classList.add('active');
+        // Find the tab by iterating
+        for (var k = 0; k < tabs.length; k++) {
+          if (tabs[k].getAttribute('onclick').indexOf(ide) > -1) {
+            tabs[k].classList.add('active');
+            break;
+          }
+        }
         var activeConfig = document.getElementById('ide-config-' + ide);
         if (activeConfig) activeConfig.style.display = 'block';
       }

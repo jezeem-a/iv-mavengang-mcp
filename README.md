@@ -7,18 +7,21 @@ Manage your projects, tasks, and team — all from inside your AI coding assista
 ## How It Works
 
 ```
-Your IDE (Claude Code, Cursor, etc.)
-    │
-    │  MCP over HTTP
-    ▼
-This server (Cloudflare Workers)
-    │
-    │  REST API (Bearer JWT, per-user)
-    ▼
-MavenGang API
+Your IDE ──OAuth 2.1 + DCR──▶ Cloudflare Worker
+                                    │
+                                    ├─ /authorize, /token, /register
+                                    ├─ /.well-known/oauth-*
+                                    └─ /mcp (Streamable HTTP)
+                                             │
+                                             ▼
+                                    Durable Object per session
+                                             │
+                                             │ MavenGang JWT
+                                             ▼
+                                    MavenGang API
 ```
 
-Each user logs in once at `/login`, gets a session key, adds it to their IDE config. All tool calls use their own MavenGang credentials — permissions and audit trail preserved.
+Each teammate connects their IDE via OAuth. On first connect, a browser opens to a MavenGang login page. After sign-in, the IDE caches a long-lived token. All API calls use the teammate's own MavenGang credentials — permissions and audit trail preserved.
 
 ## Available Tools
 
@@ -35,174 +38,92 @@ Each user logs in once at `/login`, gets a session key, adds it to their IDE con
 | `add_comment` | Comment on a task |
 | `list_comments` | Read task discussion thread |
 
-## Quick Start (for users)
+## Setup
 
-> **🚀 EASY SETUP** — Most IDEs let you paste config or use CLI to auto-configure. Skip manual setup below if your IDE supports it!
+All IDEs use OAuth — one browser sign-in per machine, then cached.
 
-### Option A: Easy Setup (Recommended)
+### Claude Desktop (Mac/Windows app)
 
-| IDE | How to set up |
-|-----|---------------|
-| **Claude Desktop** | Paste config into `~/.claude/claude_desktop_config.json`, restart app |
-| **Claude Code** | Run: `claude mcp add mavengang <URL> --header "x-session-key: <KEY>"` |
-| **Cursor** | Settings → Tools → MCP → Add server → Paste URL + header |
-| **opencode** | Run: `opencode config add mcp mavengang <URL> --header "x-session-key: <KEY>"` |
-| **Codex** | Run: `codex mcp add mavengang <URL> --header "x-session-key: <KEY>"` |
-| **Windsurf** | Settings → Cascade → MCP → Add server → Paste config |
-| **VS Code** | Extensions → Search "MCP" → Add from marketplace or paste to `.vscode/mcp.json` |
+1. Settings → Connectors → "Add custom connector"
+2. Paste: `https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp`
+3. Browser opens → sign in with MavenGang email/password → done.
 
-**After setup: Quit/restart your IDE or terminal session for changes to take effect.**
-
----
-
-### Option B: Manual Setup
-
-If your IDE doesn't support easy setup, add it manually:
-
-Each IDE stores MCP config differently. Find yours below:
-
----
-
-#### Claude Desktop
-File: `~/.claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
-```
-
----
-
-#### Claude Code (CLI)
-Use the CLI to add:
+### Claude Code CLI
 
 ```bash
-claude mcp add mavengang https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp \
-  --header "x-session-key: YOUR_SESSION_KEY"
+claude mcp add mavengang --transport http -s user -- https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp
 ```
 
-Or manually in `~/.claude/settings.json`:
+First tool call opens browser for sign-in.
+
+### Cursor
+
+`~/.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "mavengang": {
+      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"
+    }
+  }
+}
+```
+
+First use opens browser.
+
+### Windsurf
+
+`~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mavengang": {
+      "serverUrl": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"
+    }
+  }
+}
+```
+
+### opencode
+
+`~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mavengang": {
+      "type": "remote",
       "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
+      "enabled": true
     }
   }
 }
 ```
 
----
+### OpenAI Codex CLI
 
-#### Cursor
-File: `~/.cursor/mcp.json`
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
-```
-
-Or add manually: **Cursor Settings → Tools & Integrations → MCP → Add new MCP server** → choose HTTP → paste URL → add header `x-session-key`.
-
----
-
-#### Windsurf
-File: `~/.codeium/windsurf/mcp_config.json`
-
-> ⚠️ Windsurf uses `serverUrl` not `url`
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "serverUrl": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
-```
-
-Or add manually: **Windsurf Settings → Cascade → MCP Servers → Add Server** → select Remote → paste URL → add header.
-
----
-
-#### opencode
-File: `~/.config/opencode/config.json`
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
-```
-
-Or add via opencode config command.
-
-#### Codex CLI
-File: `~/.codex/config.toml`
-
-> ⚠️ Codex uses TOML format, not JSON
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.mavengang]
 url = "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"
-http_headers = { x-session-key = "YOUR_SESSION_KEY" }
-enabled = true
 ```
 
-Or add manually: **Codex Settings → MCP servers → Add server** → paste URL → add header `x-session-key`.
+### Fallback (any IDE that fails OAuth)
 
----
-
-#### VS Code (GitHub Copilot)
-File: `.vscode/mcp.json` in your workspace root (create if it doesn't exist)
-
-> ⚠️ VS Code uses `servers` instead of `mcpServers`
+Use `mcp-remote` bridge:
 
 ```json
 {
-  "servers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
+  "command": "npx",
+  "args": ["-y", "mcp-remote", "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"]
 }
 ```
 
-> ⚠️ **Important:** Quit/restart your IDE or terminal session for changes to take effect.
-
-### 3. Test it
+## Test it
 
 Done! Ask your AI assistant things like:
 - "What are my tasks?"
@@ -216,7 +137,7 @@ Want to host your own instance? It's free.
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 22+ (required for zod v4)
 - Cloudflare account ([sign up free](https://dash.cloudflare.com))
 - Wrangler CLI
 
@@ -232,34 +153,28 @@ npm install
 npm install -g wrangler
 wrangler login
 
-# 3. Create KV namespace for session storage
-wrangler kv namespace create SESSIONS
-# Copy the ID it outputs into wrangler.toml
+# 3. Create KV namespace for OAuth storage
+npx wrangler kv namespace create OAUTH_KV
+npx wrangler kv namespace create OAUTH_KV --preview
 
-# 4. Create preview namespace (for local dev)
-wrangler kv namespace create SESSIONS --preview
-# Copy the preview ID into wrangler.toml
+# 4. Update wrangler.toml with KV IDs and add Durable Object
+# See wrangler.toml for the exact structure
 
 # 5. Deploy
-wrangler deploy
+npx wrangler deploy
 # Your server is live at https://<your-worker>.<your-subdomain>.workers.dev
-
-# 6. Local dev
-wrangler dev
-# Runs at http://localhost:8787
 ```
 
 ### Cost
 
-Free. Cloudflare Workers free tier covers 100,000 requests/day. A team of 50 uses ~10,000/day.
+Free. Cloudflare Workers free tier covers 100,000 requests/day + Durable Objects (free tier works for typical team usage).
 
 ## Project Structure
 
 ```
 iv-mavengang-mcp/
-├── index.js               # MCP server (Cloudflare Workers)
-├── session-store.js       # Session storage (Cloudflare KV)
-├── wrangler.toml          # Cloudflare Workers config
+├── index.js               # MCP server (Cloudflare Workers + OAuthProvider)
+├── wrangler.toml          # Cloudflare Workers config (DO + KV)
 ├── package.json
 ├── API_CONTRACT.md        # MavenGang API documentation
 ├── PLAN.md                # Build plan + architecture decisions
@@ -277,9 +192,9 @@ This is an open-source project. Contributions welcome!
 ### Adding a new MCP tool
 
 1. Fork the repo
-2. Add your tool in `index.js` inside `createMcpServer()` — follow the existing pattern
+2. Add your tool in `index.js` inside `MavenGangMCP.init()` — follow the existing pattern
 3. Reference `API_CONTRACT.md` for available MavenGang endpoints
-4. Test locally with `wrangler dev`
+4. Test locally with `npx wrangler dev`
 5. Submit a PR
 
 ## API Reference

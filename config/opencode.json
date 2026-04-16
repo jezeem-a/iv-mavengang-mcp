@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mavengang": {
+      "type": "local",
+      "command": ["/Users/incrediblevisibility/.nvm/versions/node/v20.19.5/bin/node", "/Users/incrediblevisibility/Desktop/mavengang-mcp/mcp-server.js"],
+      "environment": {
+        "BASE_URL": "https://mavengang.com/v1",
+        "EMAIL": "jezeem@incrediblevisibility.com",
+        "PASSWORD": "Developer@02"
+      },
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}

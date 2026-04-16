@@ -92,16 +92,20 @@ File: `~/.cursor/mcp.json`
 <details>
 <summary><strong>opencode</strong></summary>
 
-File: `~/.config/opencode/config.json`
+File: `~/.config/opencode/opencode.json`
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "mavengang": {
+      "type": "remote",
       "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
       "headers": {
         "x-session-key": "YOUR_SESSION_KEY"
-      }
+      },
+      "enabled": true,
+      "timeout": 30000
     }
   }
 }
@@ -149,19 +153,13 @@ File: `.vscode/mcp.json` (in your workspace root)
 <details>
 <summary><strong>Codex CLI</strong></summary>
 
-File: `~/.codex/config.json`
+File: `~/.codex/config.toml`
 
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
+```toml
+[mcp_servers.mavengang]
+url = "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"
+http_headers = { x-session-key = "YOUR_SESSION_KEY" }
+enabled = true
 ```
 </details>
 

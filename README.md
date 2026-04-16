@@ -1,8 +1,6 @@
-# IV MavenGang MCP Server
+# MavenGang MCP Server
 
-MCP server that connects AI coding tools to the [MavenGang](https://mavengang.com) project management API. Hosted on Cloudflare Workers (free tier).
-
-Manage your projects, tasks, and team — all from inside your AI coding assistant.
+MCP server that connects AI coding assistants (Claude Desktop, Claude Code, Cursor, Windsurf, opencode, Codex CLI) to the [MavenGang](https://mavengang.com) project management API. Runs free on Cloudflare Workers with OAuth 2.1 authentication.
 
 ## How It Works
 

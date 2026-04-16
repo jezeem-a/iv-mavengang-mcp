@@ -1,0 +1,11 @@
+name = "mavengang-mcp"
+main = "mcp-server-http.js"
+compatibility_date = "2024-04-15"
+compatibility_flags = ["experimental:webSocket"]
+
+[vars]
+BASE_URL = "https://mavengang.com/v1"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "YOUR_KV_NAMESPACE_ID"

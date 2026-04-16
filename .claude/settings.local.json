@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/incrediblevisibility/.claude/**)",
+      "mcp__mavengang__list_projects"
+    ]
+  }
+}

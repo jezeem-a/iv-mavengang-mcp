@@ -190,14 +190,15 @@ const loginPage = `<!DOCTYPE html>
           btn.textContent = 'Login';
           return;
         }
+        
+        // Success - show config
         document.getElementById('login-form').style.display = 'none';
         document.getElementById('success').classList.add('show');
         
         const baseUrl = window.location.origin + '/mcp';
         const sessionKey = data.session_key;
         
-        // Claude Desktop, Claude Code, Cursor, opencode, Codex - use 'url'
-        const standardConfig = {
+        var standardConfig = {
           mcpServers: {
             mavengang: {
               url: baseUrl,
@@ -206,8 +207,7 @@ const loginPage = `<!DOCTYPE html>
           }
         };
         
-        // Windsurf - uses 'serverUrl' instead of 'url'
-        const windsurfConfig = {
+        var windsurfConfig = {
           mcpServers: {
             mavengang: {
               serverUrl: baseUrl,
@@ -216,8 +216,7 @@ const loginPage = `<!DOCTYPE html>
           }
         };
         
-        // VS Code - uses 'servers' instead of 'mcpServers'
-        const vscodeConfig = {
+        var vscodeConfig = {
           servers: {
             mavengang: {
               url: baseUrl,
@@ -232,9 +231,15 @@ const loginPage = `<!DOCTYPE html>
         document.querySelector('#ide-config-opencode pre').textContent = JSON.stringify(standardConfig, null, 2);
         document.querySelector('#ide-config-windsurf pre').textContent = JSON.stringify(windsurfConfig, null, 2);
         document.querySelector('#ide-config-vscode pre').textContent = JSON.stringify(vscodeConfig, null, 2);
+      } catch (e) {
+        error.textContent = 'Network error. Please try again.';
+        error.classList.add('show');
+        btn.disabled = false;
+        btn.textContent = 'Login';
       }
-      
-      function showIde(ide) {
+    }
+    
+    function showIde(ide) {
         var tabs = document.querySelectorAll('.ide-tab');
         var configs = document.querySelectorAll('.ide-config');
         for (var i = 0; i < tabs.length; i++) {

@@ -2,33 +2,39 @@
 
 ## Context
 
-MavenGang is a full-featured project management tool used internally by our team. The backend API is fully live at `https://mavengang.com/v1`. This MCP server wraps that API so teammates can interact with their projects and tasks directly from AI coding tools (Claude Code, Cursor, opencode) without switching context.
+MavenGang is a project management tool used by our team. The backend API is live at `https://mavengang.com/v1`. This MCP server wraps that API so teammates can interact with projects and tasks directly from AI coding tools (Claude Code, Cursor, opencode) without context switching.
 
-**Repo:** `~/Desktop/mavengang-mcp`  
-**Stack:** Node.js ESM (`"type": "module"` in package.json)  
-**MCP SDK:** `@modelcontextprotocol/server`  
-**HTTP client:** `axios`  
+**Repo:** `https://github.com/jezeem/iv-mavengang-mcp`
+**Stack:** Node.js ESM (`"type": "module"`)
+**MCP SDK:** `@modelcontextprotocol/server`
+**HTTP client:** `axios`
 **Validation:** `zod`
+**Hosting:** Cloudflare Workers (free tier)
+**Session storage:** Cloudflare KV
 
 ---
 
-## Current State
+## Project Structure
 
-| File | What it is | Status |
-|------|-----------|--------|
-| `index.js` | Express REST proxy — NOT MCP | legacy, ignore |
-| `mcp-server.js` | MCP server, stdio transport | working locally |
-
-`mcp-server.js` has 3 tools: `list_projects`, `list_tasks`, `create_task`.  
-Transport is **stdio** — runs as a subprocess on each user's machine. Not shareable.
+```
+iv-mavengang-mcp/
+├── index.js               # MCP server (Cloudflare Workers, HTTP transport)
+├── session-store.js       # Session storage abstraction (KV)
+├── wrangler.toml          # Cloudflare Workers config
+├── package.json
+├── package-lock.json
+├── .gitignore
+├── API_CONTRACT.md        # MavenGang API documentation
+├── PLAN.md                # This file
+├── README.md
+└── config/                # IDE config examples
+```
 
 ---
 
 ## Goal
 
-Build `mcp-server-http.js` — same tools as `mcp-server.js` but with **HTTP transport (Streamable HTTP / SSE)** so it can be hosted on a single server and shared with the whole team. Teammates point their MCP config to one URL.
-
-Local stdio version (`mcp-server.js`) stays intact for personal use until hosting is ready.
+`index.js` is the MCP server with **HTTP transport (Streamable HTTP / SSE)**, hosted on Cloudflare Workers. Teammates point their MCP config to one URL. Each user authenticates with their own MavenGang credentials.
 
 ---
 
@@ -38,7 +44,7 @@ MavenGang uses **Bearer JWT**. All endpoints scoped to `/v1/agencies/{agencyId}/
 
 ### Per-user session architecture
 
-Each teammate has their own session. No shared credentials. The server stores one token entry per user:
+Each teammate has their own session. No shared credentials. The server stores one token entry per user in Cloudflare KV:
 
 ```js
 {
@@ -52,24 +58,12 @@ Each teammate has their own session. No shared credentials. The server stores on
 
 ### Login flow (one-time per teammate)
 
-1. Teammate goes to `https://your-server/login` (hosted web page)
+1. Teammate goes to `https://iv-mavengang-mcp.<account>.workers.dev/login`
 2. Enters their MavenGang **email** and **password**
 3. Server calls `POST /auth/login` → gets `access_token` + `refresh_token`
 4. Server calls `GET /auth/me` → gets `agency_id` + name
-5. Server generates a `session_key` (random UUID), stores the full entry above
-6. Page shows success + `session_key` to copy
-
-```
-✅ Logged in as John
-
-Copy this into your MCP config:
-┌──────────────────────────────────────────┐
-│ "x-session-key": "abc123xyz"             │
-└──────────────────────────────────────────┘
-[ Copy ]
-```
-
-On wrong credentials → show "Wrong email or password. Try again." — no technical jargon.
+5. Server generates a `session_key` (random UUID), stores the full entry above in KV
+6. Page shows success with config to copy
 
 ### What the login success page shows
 
@@ -80,7 +74,7 @@ After successful login, page displays:
 {
   "mcpServers": {
     "mavengang": {
-      "url": "https://your-server/mcp",
+      "url": "https://iv-mavengang-mcp.<account>.workers.dev/mcp",
       "headers": {
         "x-session-key": "abc-123-uuid"
       }
@@ -103,39 +97,21 @@ With a `[ Copy ]` button.
 **3. Instruction line**
 > Paste the JSON into your IDE's config file, restart your IDE. Done.
 
-No Slack needed. No manual help needed. Self-contained onboarding.
+On wrong credentials → show "Wrong email or password. Try again."
 
 ### On every MCP tool call
 
-Server reads `x-session-key` header → looks up session → uses stored `access_token` + `agency_id` to call MavenGang API as that user.
+Server reads `x-session-key` header → looks up session from KV → uses stored `access_token` + `agency_id` to call MavenGang API as that user.
 
 ### Token auto-refresh
 
 MavenGang tokens expire. Server handles this silently:
 - On `401` from MavenGang API → call `POST /auth/refresh` with `refresh_token`
-- Get new `access_token` + `refresh_token`, update stored session
+- Get new `access_token` + `refresh_token`, update stored session in KV
 - Retry original request
 - MavenGang has rotation + reuse detection built in — secure by default
 
 Teammate never gets randomly logged out.
-
-### IDE config (after getting session key)
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "transport": "http",
-      "url": "https://your-hosted-url/mcp",
-      "headers": {
-        "x-session-key": "abc123xyz"
-      }
-    }
-  }
-}
-```
-
-Same config format works in Claude Code, Cursor, and opencode.
 
 ---
 
@@ -156,16 +132,16 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 1. `list_projects`
-**Purpose:** List all projects in the agency.  
-**API:** `GET /agencies/{agencyId}/projects`  
-**Input:** none  
+**Purpose:** List all projects in the agency.
+**API:** `GET /agencies/{agencyId}/projects`
+**Input:** none
 **Returns:** id, name, key, status, client, category, taskTotal, taskCompleted
 
 ---
 
 ### 2. `get_project`
-**Purpose:** Get details of a single project.  
-**API:** `GET /agencies/{agencyId}/projects/{projectId}`  
+**Purpose:** Get details of a single project.
+**API:** `GET /agencies/{agencyId}/projects/{projectId}`
 **Input:**
 - `projectId` (string, required)
 
@@ -174,8 +150,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 3. `list_tasks`
-**Purpose:** List tasks in a project. Supports filtering and subtask listing.  
-**API:** `GET /agencies/{agencyId}/projects/{projectId}/tasks`  
+**Purpose:** List tasks in a project. Supports filtering and subtask listing.
+**API:** `GET /agencies/{agencyId}/projects/{projectId}/tasks`
 **Input:**
 - `projectId` (string, required)
 - `status` (enum: todo | in_progress | in_qa | done, optional)
@@ -188,8 +164,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 4. `get_task`
-**Purpose:** Get full details of a single task including description.  
-**API:** `GET /agencies/{agencyId}/projects/{projectId}/tasks/{taskId}`  
+**Purpose:** Get full details of a single task including description.
+**API:** `GET /agencies/{agencyId}/projects/{projectId}/tasks/{taskId}`
 **Input:**
 - `projectId` (string, required)
 - `taskId` (string, required)
@@ -199,8 +175,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 5. `create_task`
-**Purpose:** Create a task or subtask in a project.  
-**API:** `POST /agencies/{agencyId}/projects/{projectId}/tasks`  
+**Purpose:** Create a task or subtask in a project.
+**API:** `POST /agencies/{agencyId}/projects/{projectId}/tasks`
 **Input:**
 - `projectId` (string, required)
 - `title` (string, required)
@@ -216,8 +192,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 6. `update_task`
-**Purpose:** Update task status, assignee, priority, title, or due date.  
-**API:** `PATCH /agencies/{agencyId}/projects/{projectId}/tasks/{taskId}`  
+**Purpose:** Update task status, assignee, priority, title, or due date.
+**API:** `PATCH /agencies/{agencyId}/projects/{projectId}/tasks/{taskId}`
 **Input:**
 - `projectId` (string, required)
 - `taskId` (string, required)
@@ -234,8 +210,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 7. `list_project_members`
-**Purpose:** List members of a project with their roles and user IDs (needed for assignment).  
-**API:** `GET /agencies/{agencyId}/projects/{projectId}/members`  
+**Purpose:** List members of a project with their roles and user IDs (needed for assignment).
+**API:** `GET /agencies/{agencyId}/projects/{projectId}/members`
 **Input:**
 - `projectId` (string, required)
 
@@ -244,8 +220,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 8. `get_my_tasks`
-**Purpose:** Get all tasks assigned to the current user across all projects. Great for daily standup / what's on my plate.  
-**API:** `GET /agencies/{agencyId}/my-tasks`  
+**Purpose:** Get all tasks assigned to the current user across all projects.
+**API:** `GET /agencies/{agencyId}/my-tasks`
 **Input:**
 - `status` (string, optional — comma-separated: e.g. `todo,in_progress`)
 - `sort` (enum: due_date | priority | created_at, optional)
@@ -256,8 +232,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 9. `add_comment`
-**Purpose:** Add a comment to a task.  
-**API:** `POST /agencies/{agencyId}/comments`  
+**Purpose:** Add a comment to a task.
+**API:** `POST /agencies/{agencyId}/comments`
 **Input:**
 - `taskId` (string, required)
 - `content` (string, required)
@@ -273,8 +249,8 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 ---
 
 ### 10. `list_comments`
-**Purpose:** List comments on a task.  
-**API:** `GET /agencies/{agencyId}/comments?entity_type=task&entity_id={taskId}`  
+**Purpose:** List comments on a task.
+**API:** `GET /agencies/{agencyId}/comments?entity_type=task&entity_id={taskId}`
 **Input:**
 - `taskId` (string, required)
 
@@ -282,56 +258,22 @@ These cover daily team usage. All accessible to `staff`, `manager`, `admin` role
 
 ---
 
-## File to Create
-
-**`mcp-server-http.js`**
-
-This is the new file. Do NOT modify `mcp-server.js`.
-
-### Transport
+## Transport
 
 Use `StreamableHTTPServerTransport` from `@modelcontextprotocol/sdk/server/streamableHttp.js`.
 
 The server listens on `POST /mcp` for MCP requests and `GET /mcp` for SSE.
 
-### Auth Flow
-
-Per-user sessions as defined in the **Auth Model** section above. Server does NOT have its own MavenGang credentials. Each user authenticates via `/login` and uses their own `x-session-key` header on every MCP request.
-
-### Port
-
-Default `3001` (so it doesn't conflict with `index.js` on 3000).
-
-### package.json script to add
-
-```json
-"start:http": "node mcp-server-http.js"
-```
-
----
-
-## Environment Variables
-
-`.env` for the HTTP server (no shared credentials):
-
-```env
-BASE_URL=https://mavengang.com/v1
-PORT=3001
-SESSION_SECRET=<random-32-char-string>   # used to hash session keys in storage
-```
-
-`EMAIL` and `PASSWORD` only exist in `mcp-server.js` (stdio local server). HTTP server gets credentials per-user via `/login`.
-
 ---
 
 ## Session Storage
 
-**Cloudflare KV from day 1.**
+**Cloudflare KV.**
 - Key: `session:<sha256(session_key)>`
 - Value: JSON of session entry
 - TTL: 30 days (refreshed on each use)
 
-Wrap in a small abstraction (`getSession`, `saveSession`, `deleteSession`) for testability.
+Wrap in a small abstraction (`getSession`, `saveSession`, `deleteSession`) in `session-store.js`.
 
 ---
 
@@ -383,7 +325,7 @@ MavenGang `GET /auth/me` returns `memberships[]`. For v1:
 - Use `memberships[0]` (first one)
 - If `memberships.length > 1`, log a warning server-side
 
-V2: login page shows agency picker if user has multiple memberships, stores chosen `agency_id` in session.
+V2: login page shows agency picker if user has multiple memberships.
 
 ---
 
@@ -415,7 +357,7 @@ MCP Streamable HTTP has its own `Mcp-Session-Id` header, managed by the SDK. It 
 
 ## CORS
 
-For v1 (internal team):
+For v1:
 ```
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Headers: Content-Type, x-session-key, Mcp-Session-Id
@@ -428,43 +370,31 @@ Tighten to specific origins in v2.
 
 ## Security
 
-- **HTTPS required** in production. Session key travels as a header — must not be sent over plain HTTP.
+- **HTTPS required.** Cloudflare Workers serves HTTPS by default on `*.workers.dev`.
 - **Session keys** generated via `crypto.randomUUID()`.
-- **Storage:** store `sha256(session_key)` in the session store, never the raw key. On lookup, hash incoming key and compare. Same pattern as password hashing — if storage leaks, session keys are not exposed.
-- `.env` must be in `.gitignore`.
+- **Storage:** store `sha256(session_key)` in KV, never the raw key. On lookup, hash incoming key and compare.
 - No logging of `access_token`, `refresh_token`, or `session_key` (full). Log only first 6 chars for debugging if needed.
+- `.gitignore` covers `.env`, `node_modules/`, `.wrangler/`, `.claude/`.
 
 ---
 
-## MCP Client Config (for teammates, after hosting)
+## Deployment
 
-### Claude Code / claude_desktop_config.json
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "transport": "http",
-      "url": "http://localhost:3001/mcp"
-    }
-  }
-}
-```
+**Cloudflare Workers (free tier).**
 
-Replace `localhost:3001` with hosted URL when deployed.
+- Deployed via `wrangler deploy`
+- Public URL: `https://iv-mavengang-mcp.<account>.workers.dev`
+- Local dev: `wrangler dev`
+- GitHub repo: `https://github.com/jezeem/iv-mavengang-mcp`
 
----
-
-## Deployment Target
-
-**Cloudflare Workers + KV from day 1.**
-
-- Code runs on Cloudflare Workers (not local Node)
-- Use `wrangler` CLI to deploy
-- Session data stored in Cloudflare KV namespace
-- Public URL: `https://mavengang-mcp.<account>.workers.dev` (or custom domain later)
-- Team members use that URL for `/login` and MCP config
-
-Local dev: `wrangler dev` runs the Worker locally for testing, with a preview KV namespace.
+### Setup steps
+1. Create free Cloudflare account at `dash.cloudflare.com`
+2. `npm install -g wrangler`
+3. `wrangler login`
+4. `wrangler kv namespace create SESSIONS` → copy the ID into `wrangler.toml`
+5. `wrangler kv namespace create SESSIONS --preview` → copy preview ID into `wrangler.toml`
+6. `wrangler dev` for local testing
+7. `wrangler deploy` to go live
 
 ---
 

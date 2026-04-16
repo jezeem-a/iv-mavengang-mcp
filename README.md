@@ -1,166 +1,97 @@
-# Maven Gang MCP Server
+# IV MavenGang MCP Server
 
-A learning journey: from REST API proxy to MCP server, step by step.
+MCP server that connects AI coding tools (Claude Code, Cursor, opencode, Windsurf, VS Code Copilot) to the MavenGang project management API. Hosted on Cloudflare Workers.
 
-**Goal:** Connect AI assistants (Claude Desktop, Cursor) to our Maven Gang project management tool so teams can list projects and create tasks by talking to AI.
+## How It Works
 
-## The Journey
+```
+AI IDE ← MCP (HTTP) → This server ← REST (Bearer JWT) → MavenGang API
+```
 
-This repo documents the progression of building an MCP server for a company PM tool.
+Each user logs in once at `/login`, gets a session key, adds it to their IDE config. All tool calls use their own MavenGang credentials — permissions and audit trail preserved.
 
-| Step | File | What It Does |
-|------|------|--------------|
-| [Step 1: REST API](./docs/01-step-1-rest-api.md) | `index.js` | Express proxy to Maven Gang API |
-| [Step 2: Local MCP](./docs/02-step-2-local-mcp-stdio.md) | `mcp-server.js` | MCP server with stdio transport (works locally) |
-| [Step 3: Remote MCP](./docs/03-step-3-remote-mcp-http.md) | `server.js` | MCP server with HTTP transport (works publicly) |
+## Available Tools
 
-**Current status:** Step 2 is working. Step 3 is the plan.
+| Tool | What it does |
+|------|-------------|
+| `list_projects` | List all projects |
+| `get_project` | Project details |
+| `list_tasks` | Tasks in a project (filterable) |
+| `get_task` | Full task details |
+| `create_task` | Create task or subtask |
+| `update_task` | Update status, assignee, priority |
+| `list_project_members` | Members + user IDs for assignment |
+| `get_my_tasks` | Cross-project "what's on my plate" |
+| `add_comment` | Comment on a task |
+| `list_comments` | Read task comments |
 
-## Quick Start
+## Setup
 
 ### Prerequisites
 
 - Node.js 18+
-- Maven Gang account
+- Cloudflare account (free)
+- Wrangler CLI (`npm install -g wrangler`)
 
-### Installation
+### Deploy
 
 ```bash
-git clone <your-repo>
-cd mavengang-mcp
+git clone https://github.com/jezeem/iv-mavengang-mcp.git
+cd iv-mavengang-mcp
 npm install
+
+wrangler login
+wrangler kv namespace create SESSIONS
+# Copy the namespace ID into wrangler.toml
+
+wrangler deploy
 ```
 
-### Configuration
-
-Edit `.env` file with your Maven Gang credentials:
-
-```env
-BASE_URL=https://mavengang.com/v1
-EMAIL=your-email@example.com
-PASSWORD=your-password
-```
-
-### Running
-
-**Option 1: REST API (for testing with curl)**
+### Local Dev
 
 ```bash
-npm start
-# Server runs on http://localhost:3000
+wrangler kv namespace create SESSIONS --preview
+# Copy the preview ID into wrangler.toml
 
-curl http://localhost:3000/projects
+wrangler dev
+# Server runs at http://localhost:8787
 ```
 
-**Option 2: MCP Server (for Claude/Cursor)**
+## Connecting Your IDE
 
-```bash
-npm run start:mcp
-# Connects via stdio - no port needed
-```
+1. Go to `https://iv-mavengang-mcp.<account>.workers.dev/login`
+2. Enter your MavenGang email and password
+3. Copy the JSON config shown on success
+4. Paste into your IDE's MCP config file:
 
-**Option 3: MCP Inspector (for testing MCP tools)**
+| Tool | Config file |
+|------|------------|
+| Claude Code | `~/.claude/claude_desktop_config.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| opencode | `~/.config/opencode/config.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot) | `.vscode/mcp.json` in workspace |
 
-```bash
-npx @modelcontextprotocol/inspector node mcp-server.js
-# Opens browser UI at http://localhost:6274
-```
-
-## Available Tools
-
-### list_projects
-
-Lists all projects in your Maven Gang account.
-
-**Parameters:** None
-
-### create_task
-
-Creates a new task in a Maven Gang project.
-
-**Parameters:**
-- `projectId` (required): Project ID from list_projects
-- `title` (required): Task title
-- `description` (optional): Task description
-
-## Connecting to AI Tools
-
-### Claude Desktop
-
-```bash
-cp config/claude-desktop.json ~/Library/Application\ Support/Claude/claude_desktop_config.json
-# Restart Claude Desktop
-```
-
-### Cursor
-
-```bash
-cp config/cursor.json ~/.cursor/mcp.json
-# Restart Cursor
-```
-
-### opencode
-
-```bash
-opencode --config config/opencode.json
-```
-
-## How MCP Works
-
-```
-Claude/Cursor ← JSON-RPC (stdio) → MCP Server ← HTTP (Bearer JWT) → Maven Gang API
-```
-
-- **JSON-RPC 2.0**: Protocol for remote procedure calls
-- **stdio**: Standard input/output (local only)
-- **Streamable HTTP**: Remote transport (for public hosting)
+5. Restart your IDE. Done.
 
 ## Project Structure
 
 ```
-mavengang-mcp/
-├── .env                          # Environment variables (API credentials)
-├── index.js                      # REST API server (Step 1)
-├── mcp-server.js                 # MCP server with stdio (Step 2)
-├── package.json                  # Node.js dependencies
-├── config/                       # MCP client configurations
-│   ├── claude-desktop.json
-│   ├── cursor.json
-│   └── opencode.json
-├── docs/                         # Learning documentation
-│   ├── 01-step-1-rest-api.md     # Why we started with REST
-│   ├── 02-step-2-local-mcp-stdio.md  # Local MCP with stdio
-│   └── 03-step-3-remote-mcp-http.md  # Remote MCP with HTTP (plan)
-├── API_CONTRACT.md               # Maven Gang API documentation
-└── README.md                     # This file
+iv-mavengang-mcp/
+├── index.js               # MCP server (Cloudflare Workers)
+├── session-store.js       # Session storage (KV)
+├── wrangler.toml          # Cloudflare config
+├── package.json
+├── config/                # IDE config examples
+├── API_CONTRACT.md        # MavenGang API docs
+├── PLAN.md                # Build plan
+└── README.md
 ```
-
-## Dependencies
-
-- `@modelcontextprotocol/server` — Official MCP SDK
-- `axios` — HTTP client
-- `express` — REST server (for Step 1 and Step 3)
-- `dotenv` — Environment variable loading
-- `zod` — Schema validation (required by MCP SDK)
-
-## Future Enhancements
-
-Planned tools:
-- `list_tasks` - List tasks in a project
-- `get_task` - Get task details
-- `update_task` - Update task status
-- `list_members` - List team members
-- `assign_task` - Assign task to user
 
 ## API Reference
 
-See `API_CONTRACT.md` for the full Maven Gang API documentation.
+See `API_CONTRACT.md` for the full MavenGang API documentation.
 
 ## License
 
 MIT
-
-## Credits
-
-- Built with [@modelcontextprotocol/server](https://github.com/modelcontextprotocol/typescript-sdk)
-- Maven Gang API: https://mavengang.com

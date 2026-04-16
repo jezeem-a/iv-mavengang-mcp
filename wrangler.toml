@@ -1,5 +1,5 @@
-name = "mavengang-mcp"
-main = "mcp-server-http.js"
+name = "iv-mavengang-mcp"
+main = "index.js"
 compatibility_date = "2024-04-15"
 compatibility_flags = ["experimental:webSocket"]
 

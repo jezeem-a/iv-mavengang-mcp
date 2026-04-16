@@ -289,33 +289,81 @@ const loginHandler = {
     }
 
     if (url.pathname === "/authorize") {
-      const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
-      const clientInfo = await env.OAUTH_PROVIDER.lookupClient(oauthReq.clientId);
-
+      // OAuth query params come in on GET: response_type, client_id, redirect_uri, scope, state
+      const clientId = url.searchParams.get("client_id");
+      const stateParam = url.searchParams.get("state") || "";
+      const scope = url.searchParams.get("scope") || "mcp";
+      const redirectUri = url.searchParams.get("redirect_uri") || "";
+      const responseType = url.searchParams.get("response_type") || "code";
+      const oauthState = url.searchParams.get("state");
+      
       if (request.method === "GET") {
-        const state = encodeURIComponent(JSON.stringify(oauthReq));
-        const html = loginPageHtml("", clientInfo?.clientName || "your IDE")
-          .replace(`action=""`, `action="/authorize?state=${state}"`);
+        console.log("GET /authorize - clientId:", clientId, "redirectUri:", redirectUri, "scope:", scope, "state:", oauthState);
+        
+        // Extract PKCE params from query
+        const codeChallenge = url.searchParams.get("code_challenge") || "";
+        const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "S256";
+        
+        let clientName = "your IDE";
+        if (clientId) {
+          try {
+            const clientInfo = await env.OAUTH_PROVIDER.lookupClient(clientId);
+            clientName = clientInfo?.clientName || "your IDE";
+          } catch (e) {
+            console.log("Client lookup failed:", e.message);
+          }
+        }
+        
+        // Build the OAuth request object that completeAuthorization expects
+        const oauthReq = {
+          clientId: clientId || undefined,
+          redirectUri,
+          scope: scope.split(" ").filter(s => s),
+          state: oauthState,
+          responseType,
+          codeChallenge: codeChallenge || undefined,
+          codeChallengeMethod: codeChallengeMethod || "S256",
+        };
+        console.log("Built oauthReq:", JSON.stringify(oauthReq));
+        
+        const stateParamEncoded = encodeURIComponent(JSON.stringify(oauthReq));
+        const html = loginPageHtml("", clientName)
+          .replace(`action=""`, `action="/authorize?state=${stateParamEncoded}"`);
         return new Response(html, { headers: { "Content-Type": "text/html" } });
       }
 
       if (request.method === "POST") {
-        const state = url.searchParams.get("state");
-        const savedReq = state ? JSON.parse(decodeURIComponent(state)) : oauthReq;
+        // The state param contains our OAuth params (clientId, redirectUri, etc.)
+        const stateParamFromQuery = url.searchParams.get("state");
+        if (!stateParamFromQuery) {
+          return new Response("Missing state parameter", { status: 400 });
+        }
+        let savedReq;
+        try {
+          savedReq = JSON.parse(decodeURIComponent(stateParamFromQuery));
+          console.log("POST /authorize - parsed state:", JSON.stringify(savedReq));
+        } catch {
+          return new Response("Invalid state parameter", { status: 400 });
+        }
+        
         const form = await request.formData();
         const email = form.get("email");
         const password = form.get("password");
 
         try {
+          console.log("Attempting login for:", email);
           const loginRes = await mgFetch("/auth/login", {
             method: "POST", baseUrl: env.BASE_URL,
             body: { email, password },
           });
+          console.log("Login successful for:", email);
+          
           const meRes = await mgFetch("/auth/me", {
             baseUrl: env.BASE_URL,
             headers: authHeaders(loginRes.access_token),
           });
           const agencyId = meRes.memberships[0].agency_id;
+          console.log("Got agencyId:", agencyId);
 
           const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
             request: savedReq,
@@ -328,8 +376,11 @@ const loginHandler = {
               refreshToken: loginRes.refresh_token,
             },
           });
+          console.log("CompleteAuthorization redirectTo:", redirectTo);
           return Response.redirect(redirectTo, 302);
         } catch (err) {
+          console.log("Login error:", err.message);
+          const clientInfo = savedReq?.clientId ? await env.OAUTH_PROVIDER.lookupClient(savedReq.clientId).catch(() => null) : null;
           const html = loginPageHtml("Wrong email or password", clientInfo?.clientName);
           return new Response(html, {
             status: 401,

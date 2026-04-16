@@ -100,6 +100,13 @@ const loginPage = `<!DOCTYPE html>
     th { color: #555; }
     td code { background: #f0f0f0; padding: 2px 4px; border-radius: 2px; font-size: 0.8rem; }
     .note { margin-top: 1.5rem; color: #666; font-size: 0.875rem; }
+    .ide-tabs { display: flex; gap: 4px; margin-bottom: 1rem; flex-wrap: wrap; }
+    .ide-tab { padding: 8px 12px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+    .ide-tab:hover { background: #f5f5f5; }
+    .ide-tab.active { background: #007bff; color: #fff; border-color: #007bff; }
+    .ide-config pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; margin: 0.5rem 0; }
+    .ide-config .config-path { color: #666; font-size: 0.8rem; margin: 0.5rem 0; }
+    .ide-config .config-path code { background: #f0f0f0; padding: 2px 6px; border-radius: 2px; }
   </style>
 </head>
 <body>
@@ -115,18 +122,49 @@ const loginPage = `<!DOCTYPE html>
     </div>
     <div class="success" id="success">
       <h2>&#10003; Logged In</h2>
-      <p style="margin-bottom:1rem;color:#555;">Copy this config into your IDE:</p>
-      <pre id="config-json"></pre>
-      <button class="copy-btn" onclick="copyConfig()">Copy Config</button>
-      <table>
-        <tr><th>Tool</th><th>Config File</th></tr>
-        <tr><td>Claude Code</td><td><code>~/.claude/claude_desktop_config.json</code></td></tr>
-        <tr><td>Cursor</td><td><code>~/.cursor/mcp.json</code></td></tr>
-        <tr><td>opencode</td><td><code>~/.config/opencode/config.json</code></td></tr>
-        <tr><td>Windsurf</td><td><code>~/.codeium/windsurf/mcp_config.json</code></td></tr>
-        <tr><td>VS Code (Copilot)</td><td><code>.vscode/mcp.json</code> in workspace</td></tr>
-      </table>
-      <p class="note">Paste the JSON into your IDE's config file, restart your IDE. Done.</p>
+      <p style="margin-bottom:0.5rem;color:#555;">Copy the config for your IDE:</p>
+      
+      <div class="ide-tabs">
+        <button class="ide-tab active" onclick="showIde('claude-desktop')">Claude Desktop</button>
+        <button class="ide-tab" onclick="showIde('claude-code')">Claude Code</button>
+        <button class="ide-tab" onclick="showIde('cursor')">Cursor</button>
+        <button class="ide-tab" onclick="showIde('opencode')">opencode</button>
+        <button class="ide-tab" onclick="showIde('windsurf')">Windsurf</button>
+        <button class="ide-tab" onclick="showIde('vscode')">VS Code</button>
+      </div>
+      
+      <div id="ide-config-claude-desktop" class="ide-config">
+        <pre></pre>
+        <p class="config-path">File: <code>~/.claude/claude_desktop_config.json</code></p>
+        <button class="copy-btn" onclick="copyIdeConfig('claude-desktop')">Copy</button>
+      </div>
+      <div id="ide-config-claude-code" class="ide-config" style="display:none">
+        <pre></pre>
+        <p class="config-path">File: <code>~/.claude/settings.json</code> or use CLI: <code>claude mcp add</code></p>
+        <button class="copy-btn" onclick="copyIdeConfig('claude-code')">Copy</button>
+      </div>
+      <div id="ide-config-cursor" class="ide-config" style="display:none">
+        <pre></pre>
+        <p class="config-path">File: <code>~/.cursor/mcp.json</code></p>
+        <button class="copy-btn" onclick="copyIdeConfig('cursor')">Copy</button>
+      </div>
+      <div id="ide-config-opencode" class="ide-config" style="display:none">
+        <pre></pre>
+        <p class="config-path">File: <code>~/.config/opencode/config.json</code> or CLI: <code>opencode config add mcp</code></p>
+        <button class="copy-btn" onclick="copyIdeConfig('opencode')">Copy</button>
+      </div>
+      <div id="ide-config-windsurf" class="ide-config" style="display:none">
+        <pre></pre>
+        <p class="config-path">File: <code>~/.codeium/windsurf/mcp_config.json</code></p>
+        <button class="copy-btn" onclick="copyIdeConfig('windsurf')">Copy</button>
+      </div>
+      <div id="ide-config-vscode" class="ide-config" style="display:none">
+        <pre></pre>
+        <p class="config-path">File: <code>.vscode/mcp.json</code> in your workspace</p>
+        <button class="copy-btn" onclick="copyIdeConfig('vscode')">Copy</button>
+      </div>
+      
+      <p class="note">⚠️ Quit/restart your IDE or terminal session for changes to take effect.</p>
     </div>
   </div>
   <script>
@@ -154,36 +192,75 @@ const loginPage = `<!DOCTYPE html>
         }
         document.getElementById('login-form').style.display = 'none';
         document.getElementById('success').classList.add('show');
-        document.getElementById('config-json').textContent = JSON.stringify({
+        
+        const baseUrl = window.location.origin + '/mcp';
+        const sessionKey = data.session_key;
+        
+        // Claude Desktop, Claude Code, Cursor, opencode, Codex - use 'url'
+        const standardConfig = {
           mcpServers: {
             mavengang: {
-              url: window.location.origin + '/mcp',
-              headers: { 'x-session-key': data.session_key }
+              url: baseUrl,
+              headers: { 'x-session-key': sessionKey }
             }
           }
-        }, null, 2);
-      } catch (e) {
-        error.textContent = 'Network error. Please try again.';
-        error.classList.add('show');
-        btn.disabled = false;
-        btn.textContent = 'Login';
+        };
+        
+        // Windsurf - uses 'serverUrl' instead of 'url'
+        const windsurfConfig = {
+          mcpServers: {
+            mavengang: {
+              serverUrl: baseUrl,
+              headers: { 'x-session-key': sessionKey }
+            }
+          }
+        };
+        
+        // VS Code - uses 'servers' instead of 'mcpServers'
+        const vscodeConfig = {
+          servers: {
+            mavengang: {
+              url: baseUrl,
+              headers: { 'x-session-key': sessionKey }
+            }
+          }
+        };
+        
+        document.querySelector('#ide-config-claude-desktop pre').textContent = JSON.stringify(standardConfig, null, 2);
+        document.querySelector('#ide-config-claude-code pre').textContent = JSON.stringify(standardConfig, null, 2);
+        document.querySelector('#ide-config-cursor pre').textContent = JSON.stringify(standardConfig, null, 2);
+        document.querySelector('#ide-config-opencode pre').textContent = JSON.stringify(standardConfig, null, 2);
+        document.querySelector('#ide-config-windsurf pre').textContent = JSON.stringify(windsurfConfig, null, 2);
+        document.querySelector('#ide-config-vscode pre').textContent = JSON.stringify(vscodeConfig, null, 2);
       }
-    }
-    function copyConfig() {
-      const text = document.getElementById('config-json').textContent;
-      navigator.clipboard.writeText(text);
-      const btn = document.querySelector('.copy-btn');
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = 'Copy Config', 2000);
-    }
-    // Allow Enter key to submit
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && document.getElementById('login-form').style.display !== 'none') {
-        doLogin();
+      
+      function showIde(ide) {
+        var tabs = document.querySelectorAll('.ide-tab');
+        var configs = document.querySelectorAll('.ide-config');
+        for (var i = 0; i < tabs.length; i++) {
+          tabs[i].classList.remove('active');
+        }
+        for (var j = 0; j < configs.length; j++) {
+          configs[j].style.display = 'none';
+        }
+        var activeTab = document.querySelector('.ide-tab[onclick="showIde(\'' + ide + '\')"]');
+        if (activeTab) activeTab.classList.add('active');
+        var activeConfig = document.getElementById('ide-config-' + ide);
+        if (activeConfig) activeConfig.style.display = 'block';
       }
-    });
-  </script>
-</body>
+      
+      function copyIdeConfig(ide) {
+        var configEl = document.querySelector('#ide-config-' + ide + ' pre');
+        var text = configEl ? configEl.textContent : '';
+        navigator.clipboard.writeText(text);
+        var btn = document.querySelector('#ide-config-' + ide + ' .copy-btn');
+        if (btn) {
+          btn.textContent = 'Copied!';
+          setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+        }
+      }
+    </script>
+  </body>
 </html>`;
 
 // --- Build MCP server with all 10 tools ---
@@ -548,7 +625,7 @@ export default {
       });
     }
 
-    // MCP endpoint — stateless per-request (Cloudflare Workers model)
+    // MCP endpoint
     if (path === "/mcp") {
       const sessionKey = request.headers.get("x-session-key");
       if (!sessionKey) {
@@ -561,16 +638,22 @@ export default {
         return errorResponse("SESSION_INVALID", "Session expired. Please re-login.", 401);
       }
 
-      // Create server with session context baked in via closure
+      // Create new server per request
       const server = createMcpServer({ kv: env.SESSIONS, env, session, keyHash });
 
-      // Stateless transport — no session IDs, new server per request
+      // Stateless transport
       const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined // stateless mode
+        sessionIdGenerator: undefined
       });
 
       await server.connect(transport);
-      return transport.handleRequest(request);
+
+      // Override Accept header to ensure MCP protocol works
+      const headers = new Headers(request.headers);
+      headers.set("Accept", "application/json, text/event-stream");
+      const modifiedRequest = new Request(request, { headers });
+
+      return transport.handleRequest(modifiedRequest);
     }
 
     return new Response("Not Found", { status: 404, headers: corsHeaders() });

@@ -37,23 +37,33 @@ Each user logs in once at `/login`, gets a session key, adds it to their IDE con
 
 ## Quick Start (for users)
 
-### 1. Login
+> **🚀 EASY SETUP** — Most IDEs let you paste config or use CLI to auto-configure. Skip manual setup below if your IDE supports it!
 
-Go to the hosted login page:
+### Option A: Easy Setup (Recommended)
 
-```
-https://iv-mavengang-mcp.jezeem-dev.workers.dev/login
-```
+| IDE | How to set up |
+|-----|---------------|
+| **Claude Desktop** | Paste config into `~/.claude/claude_desktop_config.json`, restart app |
+| **Claude Code** | Run: `claude mcp add mavengang <URL> --header "x-session-key: <KEY>"` |
+| **Cursor** | Settings → Tools → MCP → Add server → Paste URL + header |
+| **opencode** | Run: `opencode config add mcp mavengang <URL> --header "x-session-key: <KEY>"` |
+| **Codex** | Run: `codex mcp add mavengang <URL> --header "x-session-key: <KEY>"` |
+| **Windsurf** | Settings → Cascade → MCP → Add server → Paste config |
+| **VS Code** | Extensions → Search "MCP" → Add from marketplace or paste to `.vscode/mcp.json` |
 
-Enter your MavenGang email and password. On success, you'll see a ready-to-copy JSON config block.
+**After setup: Quit/restart your IDE or terminal session for changes to take effect.**
 
-### 2. Add to your IDE
+---
 
-Copy the config and paste it into your IDE's MCP config file. Here's where each IDE keeps it:
+### Option B: Manual Setup
 
-<details>
-<summary><strong>Claude Code</strong></summary>
+If your IDE doesn't support easy setup, add it manually:
 
+Each IDE stores MCP config differently. Find yours below:
+
+---
+
+#### Claude Desktop
 File: `~/.claude/claude_desktop_config.json`
 
 ```json
@@ -68,11 +78,35 @@ File: `~/.claude/claude_desktop_config.json`
   }
 }
 ```
-</details>
 
-<details>
-<summary><strong>Cursor</strong></summary>
+---
 
+#### Claude Code (CLI)
+Use the CLI to add:
+
+```bash
+claude mcp add mavengang https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp \
+  --header "x-session-key: YOUR_SESSION_KEY"
+```
+
+Or manually in `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mavengang": {
+      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
+      "headers": {
+        "x-session-key": "YOUR_SESSION_KEY"
+      }
+    }
+  }
+}
+```
+
+---
+
+#### Cursor
 File: `~/.cursor/mcp.json`
 
 ```json
@@ -87,36 +121,36 @@ File: `~/.cursor/mcp.json`
   }
 }
 ```
-</details>
 
-<details>
-<summary><strong>opencode</strong></summary>
+Or add manually: **Cursor Settings → Tools & Integrations → MCP → Add new MCP server** → choose HTTP → paste URL → add header `x-session-key`.
 
-File: `~/.config/opencode/opencode.json`
+---
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "mavengang": {
-      "type": "remote",
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      },
-      "enabled": true,
-      "timeout": 30000
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Windsurf</strong></summary>
-
+#### Windsurf
 File: `~/.codeium/windsurf/mcp_config.json`
 
+> ⚠️ Windsurf uses `serverUrl` not `url`
+
+```json
+{
+  "mcpServers": {
+    "mavengang": {
+      "serverUrl": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
+      "headers": {
+        "x-session-key": "YOUR_SESSION_KEY"
+      }
+    }
+  }
+}
+```
+
+Or add manually: **Windsurf Settings → Cascade → MCP Servers → Add Server** → select Remote → paste URL → add header.
+
+---
+
+#### opencode
+File: `~/.config/opencode/config.json`
+
 ```json
 {
   "mcpServers": {
@@ -129,31 +163,13 @@ File: `~/.codeium/windsurf/mcp_config.json`
   }
 }
 ```
-</details>
 
-<details>
-<summary><strong>VS Code (GitHub Copilot)</strong></summary>
+Or add via opencode config command.
 
-File: `.vscode/mcp.json` (in your workspace root)
-
-```json
-{
-  "mcpServers": {
-    "mavengang": {
-      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
-      "headers": {
-        "x-session-key": "YOUR_SESSION_KEY"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><strong>Codex CLI</strong></summary>
-
+#### Codex CLI
 File: `~/.codex/config.toml`
+
+> ⚠️ Codex uses TOML format, not JSON
 
 ```toml
 [mcp_servers.mavengang]
@@ -161,11 +177,34 @@ url = "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp"
 http_headers = { x-session-key = "YOUR_SESSION_KEY" }
 enabled = true
 ```
-</details>
 
-### 3. Restart your IDE
+Or add manually: **Codex Settings → MCP servers → Add server** → paste URL → add header `x-session-key`.
 
-Done. Ask your AI assistant things like:
+---
+
+#### VS Code (GitHub Copilot)
+File: `.vscode/mcp.json` in your workspace root (create if it doesn't exist)
+
+> ⚠️ VS Code uses `servers` instead of `mcpServers`
+
+```json
+{
+  "servers": {
+    "mavengang": {
+      "url": "https://iv-mavengang-mcp.jezeem-dev.workers.dev/mcp",
+      "headers": {
+        "x-session-key": "YOUR_SESSION_KEY"
+      }
+    }
+  }
+}
+```
+
+> ⚠️ **Important:** Quit/restart your IDE or terminal session for changes to take effect.
+
+### 3. Test it
+
+Done! Ask your AI assistant things like:
 - "What are my tasks?"
 - "List tasks in the BW project"
 - "Create a subtask under PRJ5-42 for API changes"

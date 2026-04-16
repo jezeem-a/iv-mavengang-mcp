@@ -15,6 +15,7 @@
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/server": "^2.0.0-alpha.2",
+    "agents-sdk": "^1.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

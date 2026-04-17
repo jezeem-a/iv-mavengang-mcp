@@ -80,7 +80,7 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_tasks",
-      "List tasks in a project. Pass parentId to get subtasks.",
+      "List tasks in a project. Pass parentId (task UUID, not task_number like PRJ8-1) to get subtasks of that task.",
       {
         projectId: z.string(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
@@ -107,7 +107,7 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "get_task",
-      "Get full details of a single task",
+      "Get full details of a single task. taskId must be the UUID `id` field, not the display task_number (e.g. PRJ8-1).",
       { projectId: z.string(), taskId: z.string() },
       async ({ projectId, taskId }) => {
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`);
@@ -200,7 +200,7 @@ export class MavenGangMCP extends McpAgent {
         const q = params.toString() ? "?" + params.toString() : "";
         const res = await apiCall("GET", `/agencies/${agencyId()}/my-tasks${q}`);
         const tasks = res.items.map(t => ({
-          taskNumber: t.task_number, title: t.title,
+          id: t.id, taskNumber: t.task_number, title: t.title,
           status: t.status_name || t.status, priority: t.priority,
           dueDate: t.due_date, projectId: t.project_id, projectName: t.project_name,
         }));

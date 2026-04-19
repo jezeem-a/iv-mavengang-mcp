@@ -11,9 +11,13 @@ async function mgFetch(path, { method = "GET", headers = {}, body, baseUrl }) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    const err = new Error(`MavenGang API ${res.status}`);
+    const err = new Error(`MavenGang API error: ${method} ${path} returned ${res.status}`);
     err.status = res.status;
-    try { err.data = await res.json(); } catch {}
+    err.method = method;
+    err.path = path;
+    try { err.data = await res.json(); } catch {
+      err.data = await res.text();
+    }
     throw err;
   }
   return res.json();
@@ -28,6 +32,20 @@ export class MavenGangMCP extends McpAgent {
   });
 
   async init() {
+    let refreshPromise = null;
+
+    // Dual source of truth: OAUTH_KV has live tokens, OAuthProvider's grant KV has originals.
+    // Read latest from KV on init for DO resilience. Write on login + refresh.
+    const userKey = this.props.email || "unknown";
+    const storedTokens = await this.env.OAUTH_KV.get(`tokens:${userKey}`);
+    if (storedTokens) {
+      try {
+        const tokens = JSON.parse(storedTokens);
+        this.props.accessToken = tokens.accessToken;
+        this.props.refreshToken = tokens.refreshToken;
+      } catch {}
+    }
+
     const apiCall = async (method, path, body = null) => {
       const baseUrl = this.env.BASE_URL;
       try {
@@ -37,12 +55,33 @@ export class MavenGangMCP extends McpAgent {
         });
       } catch (err) {
         if (err.status !== 401) throw err;
-        const refreshed = await mgFetch("/auth/refresh", {
-          method: "POST", baseUrl,
-          body: { refreshToken: this.props.refreshToken },
-        });
-        this.props.accessToken = refreshed.access_token;
-        this.props.refreshToken = refreshed.refresh_token;
+        if (!refreshPromise) {
+          refreshPromise = (async () => {
+            const refreshed = await mgFetch("/auth/refresh", {
+              method: "POST", baseUrl,
+              body: { refreshToken: this.props.refreshToken },
+            });
+            this.props.accessToken = refreshed.access_token;
+            this.props.refreshToken = refreshed.refresh_token;
+
+            const userKey = this.props.email || "unknown";
+            await this.env.OAUTH_KV.put(`tokens:${userKey}`, JSON.stringify({
+              accessToken: refreshed.access_token,
+              refreshToken: refreshed.refresh_token,
+            }), { expirationTtl: 604800 }); // 7 days - matches typical refresh token TTL
+
+            return refreshed;
+          })();
+        }
+        try {
+          await refreshPromise;
+        } catch (refreshErr) {
+          refreshPromise = null;
+          const error = new Error("Session expired. Please re-authenticate.");
+          error.status = 401;
+          throw error;
+        }
+        refreshPromise = null;
         return await mgFetch(path, {
           method, body, baseUrl,
           headers: authHeaders(this.props.accessToken),
@@ -54,15 +93,26 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_projects",
-      "List all projects in your Maven Gang account",
-      {},
-      async () => {
-        const res = await apiCall("GET", `/agencies/${agencyId()}/projects`);
-        const projects = res.items.map(p => ({
-          id: p.id, name: p.name, key: p.key, status: p.status,
-          client: p.clients?.[0]?.name || "No client",
-          category: p.category_name,
-          taskTotal: p.task_total, taskCompleted: p.task_completed,
+      "List all projects. Filter by status, client. Search by name.",
+      {
+        status: z.enum(["active", "on_hold", "completed", "cancelled"]).optional(),
+        clientId: z.string().optional(),
+        search: z.string().optional(),
+        limit: z.number().min(1).max(100).optional(),
+        cursor: z.string().optional(),
+      },
+      async ({ status, clientId, search, limit, cursor }) => {
+        const params = new URLSearchParams();
+        if (status) params.append("status", status);
+        if (clientId) params.append("client_id", clientId);
+        if (search) params.append("search", search);
+        if (limit) params.append("limit", String(limit));
+        if (cursor) params.append("cursor", cursor);
+        const q = params.toString() ? "?" + params.toString() : "";
+        const res = await apiCall("GET", `/agencies/${agencyId()}/projects${q}`);
+        const projects = (res.items || []).map(p => ({
+          id: p.id, name: p.name, status: p.status,
+          client: p.clients?.[0]?.name || null,
         }));
         return { content: [{ type: "text", text: JSON.stringify(projects, null, 2) }] };
       }
@@ -80,19 +130,29 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_tasks",
-      "List tasks in a project. Pass parentId (task UUID, not task_number like PRJ8-1) to get subtasks of that task.",
+      "List tasks in a project. Filter by status, assignee, milestone. Pass parentId to get subtasks. Set topLevelOnly=false to get all tasks.",
       {
         projectId: z.string(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
+        assignedUserId: z.string().optional(),
+        milestoneId: z.string().optional(),
         parentId: z.string().optional(),
+        topLevelOnly: z.boolean().default(true),
+        limit: z.number().min(1).max(100).optional(),
+        cursor: z.string().optional(),
       },
-      async ({ projectId, status, parentId }) => {
+      async ({ projectId, status, assignedUserId, milestoneId, parentId, topLevelOnly, limit, cursor }) => {
         const params = new URLSearchParams();
         if (status) params.append("status", status);
+        if (assignedUserId) params.append("assigned_user_id", assignedUserId);
+        if (milestoneId) params.append("milestone_id", milestoneId);
         if (parentId) params.append("parent_id", parentId);
+        if (topLevelOnly === false) params.append("top_level_only", "false");
+        if (limit) params.append("limit", String(limit));
+        if (cursor) params.append("cursor", cursor);
         const q = params.toString() ? "?" + params.toString() : "";
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks${q}`);
-        const tasks = res.items.map(t => ({
+        const tasks = (res.items || []).map(t => ({
           id: t.id, taskNumber: t.task_number, title: t.title,
           description: t.description || "",
           status: t.status_name || t.status, priority: t.priority,
@@ -117,24 +177,30 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "create_task",
-      "Create a new task or subtask",
+      "Create a new task or subtask. Pass null to clear optional fields.",
       {
         projectId: z.string(),
         title: z.string(),
-        description: z.string().optional(),
-        parentId: z.string().optional(),
-        assignedUserId: z.string().optional(),
+        description: z.string().nullable().optional(),
+        parentId: z.string().nullable().optional(),
+        milestoneId: z.string().nullable().optional(),
+        assignedUserId: z.string().nullable().optional(),
         priority: z.number().optional(),
-        dueDate: z.string().optional(),
+        dueDate: z.string().nullable().optional(),
+        startDate: z.string().nullable().optional(),
+        estimatedHours: z.number().optional(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
       },
-      async ({ projectId, title, description, parentId, assignedUserId, priority, dueDate, status }) => {
+      async ({ projectId, title, description, parentId, milestoneId, assignedUserId, priority, dueDate, startDate, estimatedHours, status }) => {
         const body = { title };
-        if (description) body.description = description;
-        if (parentId) body.parent_id = parentId;
-        if (assignedUserId) body.assigned_user_id = assignedUserId;
+        if (description !== undefined) body.description = description;
+        if (parentId !== undefined) body.parent_id = parentId;
+        if (milestoneId !== undefined) body.milestone_id = milestoneId;
+        if (assignedUserId !== undefined) body.assigned_user_id = assignedUserId;
         if (priority !== undefined) body.priority = priority;
-        if (dueDate) body.due_date = dueDate;
+        if (dueDate !== undefined) body.due_date = dueDate;
+        if (startDate !== undefined) body.start_date = startDate;
+        if (estimatedHours !== undefined) body.estimated_hours = estimatedHours;
         if (status) body.status = status;
         const res = await apiCall("POST", `/agencies/${agencyId()}/projects/${projectId}/tasks`, body);
         const task = res.task;
@@ -149,23 +215,30 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "update_task",
-      "Update task status, assignee, priority, title, or due date",
+      "Update task status, assignee, priority, title, description, milestone, or due date. Pass null to clear optional fields.",
       {
         projectId: z.string(),
         taskId: z.string(),
-        title: z.string().optional(),
+        title: z.string().nullable().optional(),
+        description: z.string().nullable().optional(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
-        assignedUserId: z.string().optional(),
+        assignedUserId: z.string().nullable().optional(),
+        milestoneId: z.string().nullable().optional(),
         priority: z.number().optional(),
-        dueDate: z.string().optional(),
+        dueDate: z.string().nullable().optional(),
       },
-      async ({ projectId, taskId, title, status, assignedUserId, priority, dueDate }) => {
+      async ({ projectId, taskId, title, description, status, assignedUserId, milestoneId, priority, dueDate }) => {
         const body = {};
-        if (title) body.title = title;
+        if (title !== undefined) body.title = title;
+        if (description !== undefined) body.description = description;
         if (status) body.status = status;
-        if (assignedUserId) body.assigned_user_id = assignedUserId;
+        if (assignedUserId !== undefined) body.assigned_user_id = assignedUserId;
+        if (milestoneId !== undefined) body.milestone_id = milestoneId;
         if (priority !== undefined) body.priority = priority;
-        if (dueDate) body.due_date = dueDate;
+        if (dueDate !== undefined) body.due_date = dueDate;
+        if (Object.keys(body).length === 0) {
+          return { content: [{ type: "text", text: "No fields to update. Pass at least one of: title, description, status, assignedUserId, milestoneId, priority, dueDate." }] };
+        }
         const res = await apiCall("PATCH", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`, body);
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
       }
@@ -174,10 +247,18 @@ export class MavenGangMCP extends McpAgent {
     this.server.tool(
       "list_project_members",
       "List members of a project with user IDs for assignment",
-      { projectId: z.string() },
-      async ({ projectId }) => {
-        const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/members`);
-        const members = (res.items || res).map(m => ({
+      {
+        projectId: z.string(),
+        limit: z.number().min(1).max(100).optional(),
+        cursor: z.string().optional(),
+      },
+      async ({ projectId, limit, cursor }) => {
+        const params = new URLSearchParams();
+        if (limit) params.append("limit", String(limit));
+        if (cursor) params.append("cursor", cursor);
+        const q = params.toString() ? "?" + params.toString() : "";
+        const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/members${q}`);
+        const members = (res.items || []).map(m => ({
           userId: m.user_id, firstName: m.first_name, lastName: m.last_name, role: m.role,
         }));
         return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
@@ -186,20 +267,22 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "get_my_tasks",
-      "Get all tasks assigned to current user across all projects",
+      "Get all tasks assigned to current user across all projects. Filter by status (comma-separated: todo,in_progress,in_qa,done).",
       {
         status: z.string().optional(),
         sort: z.enum(["due_date", "priority", "created_at"]).optional(),
-        limit: z.number().optional(),
+        limit: z.number().min(1).max(100).optional(),
+        cursor: z.string().optional(),
       },
-      async ({ status, sort, limit }) => {
+      async ({ status, sort, limit, cursor }) => {
         const params = new URLSearchParams();
         if (status) params.append("status", status);
         if (sort) params.append("sort", sort);
         if (limit) params.append("limit", String(limit));
+        if (cursor) params.append("cursor", cursor);
         const q = params.toString() ? "?" + params.toString() : "";
         const res = await apiCall("GET", `/agencies/${agencyId()}/my-tasks${q}`);
-        const tasks = res.items.map(t => ({
+        const tasks = (res.items || []).map(t => ({
           id: t.id, taskNumber: t.task_number, title: t.title,
           status: t.status_name || t.status, priority: t.priority,
           dueDate: t.due_date, projectId: t.project_id, projectName: t.project_name,
@@ -235,7 +318,7 @@ export class MavenGangMCP extends McpAgent {
       async ({ taskId }) => {
         const res = await apiCall(
           "GET",
-          `/agencies/${agencyId()}/comments?entity_type=task&entity_id=${taskId}`
+          `/agencies/${agencyId()}/comments?entity_type=task&entity_id=${encodeURIComponent(taskId)}`
         );
         const comments = (res.items || []).map(c => ({
           id: c.id,
@@ -247,8 +330,69 @@ export class MavenGangMCP extends McpAgent {
         return { content: [{ type: "text", text: JSON.stringify(comments, null, 2) }] };
       }
     );
+
+    this.server.tool(
+      "delete_task",
+      "Delete a task from a project",
+      { projectId: z.string(), taskId: z.string() },
+      async ({ projectId, taskId }) => {
+        await apiCall("DELETE", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`);
+        return { content: [{ type: "text", text: `Task ${taskId} deleted successfully.` }] };
+      }
+    );
+
+    this.server.tool(
+      "update_comment",
+      "Update a comment's content",
+      { commentId: z.string(), content: z.string() },
+      async ({ commentId, content }) => {
+        const res = await apiCall("PATCH", `/agencies/${agencyId()}/comments/${commentId}`, { content });
+        return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+      }
+    );
+
+    this.server.tool(
+      "delete_comment",
+      "Delete a comment",
+      { commentId: z.string() },
+      async ({ commentId }) => {
+        await apiCall("DELETE", `/agencies/${agencyId()}/comments/${commentId}`);
+        return { content: [{ type: "text", text: `Comment ${commentId} deleted.` }] };
+      }
+    );
+
+    this.server.tool(
+      "list_clients",
+      "List all clients in the agency",
+      {
+        search: z.string().optional(),
+        status: z.enum(["active", "inactive"]).optional(),
+        limit: z.number().min(1).max(100).optional(),
+        cursor: z.string().optional(),
+      },
+      async ({ search, status, limit, cursor }) => {
+        const params = new URLSearchParams();
+        if (search) params.append("search", search);
+        if (status) params.append("status", status);
+        if (limit) params.append("limit", String(limit));
+        if (cursor) params.append("cursor", cursor);
+        const q = params.toString() ? "?" + params.toString() : "";
+        const res = await apiCall("GET", `/agencies/${agencyId()}/clients${q}`);
+        const clients = (res.items || []).map(c => ({
+          id: c.id, name: c.name, contactEmail: c.contact_email,
+        }));
+        return { content: [{ type: "text", text: JSON.stringify(clients, null, 2) }] };
+      }
+    );
   }
 }
+
+const htmlEscape = (s) => String(s)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#039;");
 
 const loginPageHtml = (errorMsg = "", clientName = "your IDE") => `<!DOCTYPE html>
 <html><head>
@@ -270,8 +414,8 @@ const loginPageHtml = (errorMsg = "", clientName = "your IDE") => `<!DOCTYPE htm
 </style></head><body>
 <form class="card" method="POST" action="">
   <h1>Sign in to MavenGang</h1>
-  <p class="sub">${clientName} is requesting access to your account.</p>
-  ${errorMsg ? `<div class="err">${errorMsg}</div>` : ""}
+  <p class="sub">${htmlEscape(clientName)} is requesting access to your account.</p>
+  ${errorMsg ? `<div class="err">${htmlEscape(errorMsg)}</div>` : ""}
   <input name="email" type="email" placeholder="Email" required autofocus>
   <input name="password" type="password" placeholder="Password" required>
   <button type="submit">Sign in</button>
@@ -289,59 +433,54 @@ const loginHandler = {
     }
 
     if (url.pathname === "/authorize") {
-      // OAuth query params come in on GET: response_type, client_id, redirect_uri, scope, state
       const clientId = url.searchParams.get("client_id");
-      const stateParam = url.searchParams.get("state") || "";
       const scope = url.searchParams.get("scope") || "mcp";
       const redirectUri = url.searchParams.get("redirect_uri") || "";
       const responseType = url.searchParams.get("response_type") || "code";
-      const oauthState = url.searchParams.get("state");
-      
+
       if (request.method === "GET") {
-        console.log("GET /authorize - clientId:", clientId, "redirectUri:", redirectUri, "scope:", scope, "state:", oauthState);
-        
-        // Extract PKCE params from query
         const codeChallenge = url.searchParams.get("code_challenge") || "";
         const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "S256";
-        
+
         let clientName = "your IDE";
         if (clientId) {
           try {
             const clientInfo = await env.OAUTH_PROVIDER.lookupClient(clientId);
             clientName = clientInfo?.clientName || "your IDE";
-          } catch (e) {
-            console.log("Client lookup failed:", e.message);
-          }
+          } catch (e) {}
         }
-        
-        // Build the OAuth request object that completeAuthorization expects
+
+        const stateId = crypto.randomUUID();
         const oauthReq = {
           clientId: clientId || undefined,
           redirectUri,
           scope: scope.split(" ").filter(s => s),
-          state: oauthState,
           responseType,
           codeChallenge: codeChallenge || undefined,
           codeChallengeMethod: codeChallengeMethod || "S256",
         };
-        console.log("Built oauthReq:", JSON.stringify(oauthReq));
-        
-        const stateParamEncoded = encodeURIComponent(JSON.stringify(oauthReq));
+
+        await env.OAUTH_KV.put(`oauth_state:${stateId}`, JSON.stringify(oauthReq), { expirationTtl: 600 });
+
         const html = loginPageHtml("", clientName)
-          .replace(`action=""`, `action="/authorize?state=${stateParamEncoded}"`);
+          .replace(`action=""`, `action="/authorize?state=${stateId}"`);
         return new Response(html, { headers: { "Content-Type": "text/html" } });
       }
 
       if (request.method === "POST") {
-        // The state param contains our OAuth params (clientId, redirectUri, etc.)
-        const stateParamFromQuery = url.searchParams.get("state");
-        if (!stateParamFromQuery) {
+        const stateId = url.searchParams.get("state");
+        if (!stateId) {
           return new Response("Missing state parameter", { status: 400 });
         }
+
         let savedReq;
         try {
-          savedReq = JSON.parse(decodeURIComponent(stateParamFromQuery));
-          console.log("POST /authorize - parsed state:", JSON.stringify(savedReq));
+          const stored = await env.OAUTH_KV.get(`oauth_state:${stateId}`);
+          if (!stored) {
+            return new Response("Invalid or expired state", { status: 400 });
+          }
+          savedReq = JSON.parse(stored);
+          await env.OAUTH_KV.delete(`oauth_state:${stateId}`);
         } catch {
           return new Response("Invalid state parameter", { status: 400 });
         }
@@ -351,19 +490,27 @@ const loginHandler = {
         const password = form.get("password");
 
         try {
-          console.log("Attempting login for:", email);
           const loginRes = await mgFetch("/auth/login", {
             method: "POST", baseUrl: env.BASE_URL,
             body: { email, password },
           });
-          console.log("Login successful for:", email);
-          
+
           const meRes = await mgFetch("/auth/me", {
             baseUrl: env.BASE_URL,
             headers: authHeaders(loginRes.access_token),
           });
+
+          if (!meRes.memberships || meRes.memberships.length === 0) {
+            const html = loginPageHtml("No agency found. Please create an agency first.", savedReq?.clientName);
+            return new Response(html, { status: 400, headers: { "Content-Type": "text/html" } });
+          }
+
           const agencyId = meRes.memberships[0].agency_id;
-          console.log("Got agencyId:", agencyId);
+
+          await env.OAUTH_KV.put(`tokens:${email}`, JSON.stringify({
+            accessToken: loginRes.access_token,
+            refreshToken: loginRes.refresh_token,
+          }), { expirationTtl: 604800 }); // 7 days - matches typical refresh token TTL
 
           const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
             request: savedReq,
@@ -376,12 +523,16 @@ const loginHandler = {
               refreshToken: loginRes.refresh_token,
             },
           });
-          console.log("CompleteAuthorization redirectTo:", redirectTo);
           return Response.redirect(redirectTo, 302);
         } catch (err) {
-          console.log("Login error:", err.message);
-          const clientInfo = savedReq?.clientId ? await env.OAUTH_PROVIDER.lookupClient(savedReq.clientId).catch(() => null) : null;
-          const html = loginPageHtml("Wrong email or password", clientInfo?.clientName);
+          let clientName = "your IDE";
+          if (savedReq?.clientId) {
+            try {
+              const clientInfo = await env.OAUTH_PROVIDER.lookupClient(savedReq.clientId);
+              clientName = clientInfo?.clientName || "your IDE";
+            } catch {}
+          }
+          const html = loginPageHtml("Wrong email or password", clientName);
           return new Response(html, {
             status: 401,
             headers: { "Content-Type": "text/html" },

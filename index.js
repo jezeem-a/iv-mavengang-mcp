@@ -34,6 +34,8 @@ export class MavenGangMCP extends McpAgent {
   async init() {
     let refreshPromise = null;
 
+    // Dual source of truth: OAUTH_KV has live tokens, OAuthProvider's grant KV has originals.
+    // Read latest from KV on init for DO resilience. Write on login + refresh.
     const userKey = this.props.email || "unknown";
     const storedTokens = await this.env.OAUTH_KV.get(`tokens:${userKey}`);
     if (storedTokens) {
@@ -66,7 +68,7 @@ export class MavenGangMCP extends McpAgent {
             await this.env.OAUTH_KV.put(`tokens:${userKey}`, JSON.stringify({
               accessToken: refreshed.access_token,
               refreshToken: refreshed.refresh_token,
-            }), { expirationTtl: 86400 });
+            }), { expirationTtl: 604800 }); // 7 days - matches typical refresh token TTL
 
             return refreshed;
           })();
@@ -508,7 +510,7 @@ const loginHandler = {
           await env.OAUTH_KV.put(`tokens:${email}`, JSON.stringify({
             accessToken: loginRes.access_token,
             refreshToken: loginRes.refresh_token,
-          }), { expirationTtl: 86400 });
+          }), { expirationTtl: 604800 }); // 7 days - matches typical refresh token TTL
 
           const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
             request: savedReq,

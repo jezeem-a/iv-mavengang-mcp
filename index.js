@@ -1256,7 +1256,7 @@ export class MavenGangMCP extends McpAgent {
       "Submit a timesheet for approval",
       { weekStart: z.string() },
       async ({ weekStart }) => {
-        const res = await apiCall("POST", `/agencies/${agencyId()}/timesheets/submit`, { weekStart });
+        const res = await apiCall("POST", `/agencies/${agencyId()}/timesheets/submit`, { week_start: weekStart });
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
       }
     );

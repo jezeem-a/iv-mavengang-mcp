@@ -11,13 +11,14 @@ async function mgFetch(path, { method = "GET", headers = {}, body, baseUrl }) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    const err = new Error(`MavenGang API error: ${method} ${path} returned ${res.status}`);
+    let errData;
+    try { errData = await res.json(); } catch { errData = await res.text(); }
+    const errDetail = typeof errData === "object" ? JSON.stringify(errData) : errData;
+    const err = new Error(`MavenGang API error: ${method} ${path} returned ${res.status} — ${errDetail}`);
     err.status = res.status;
     err.method = method;
     err.path = path;
-    try { err.data = await res.json(); } catch {
-      err.data = await res.text();
-    }
+    err.data = errData;
     throw err;
   }
   return res.json();
@@ -32,19 +33,79 @@ export class MavenGangMCP extends McpAgent {
   });
 
   async init() {
+    if (!this.props.email) {
+      throw new Error("Auth grant missing email. Reconnect required.");
+    }
+    const userKey = this.props.email;
+    const tokensKey = `tokens:${userKey}`;
+    const lockKey = `refresh_lock:${userKey}`;
     let refreshPromise = null;
 
-    // Dual source of truth: OAUTH_KV has live tokens, OAuthProvider's grant KV has originals.
-    // Read latest from KV on init for DO resilience. Write on login + refresh.
-    const userKey = this.props.email || "unknown";
-    const storedTokens = await this.env.OAUTH_KV.get(`tokens:${userKey}`);
-    if (storedTokens) {
+    const loadTokensFromKV = async () => {
+      const stored = await this.env.OAUTH_KV.get(tokensKey);
+      if (!stored) return false;
       try {
-        const tokens = JSON.parse(storedTokens);
+        const tokens = JSON.parse(stored);
         this.props.accessToken = tokens.accessToken;
         this.props.refreshToken = tokens.refreshToken;
-      } catch {}
-    }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    await loadTokensFromKV();
+
+    const saveTokensToKV = async (accessToken, refreshToken) => {
+      await this.env.OAUTH_KV.put(tokensKey, JSON.stringify({
+        accessToken, refreshToken,
+      }), { expirationTtl: 604800 });
+    };
+
+    // KV-based cross-DO lock. Value = random nonce; TTL caps lock duration.
+    const acquireRefreshLock = async () => {
+      const nonce = crypto.randomUUID();
+      const existing = await this.env.OAUTH_KV.get(lockKey);
+      if (existing) return null;
+      await this.env.OAUTH_KV.put(lockKey, nonce, { expirationTtl: 15 });
+      const check = await this.env.OAUTH_KV.get(lockKey);
+      return check === nonce ? nonce : null;
+    };
+
+    const releaseRefreshLock = async (nonce) => {
+      const current = await this.env.OAUTH_KV.get(lockKey);
+      if (current === nonce) await this.env.OAUTH_KV.delete(lockKey);
+    };
+
+    const refreshTokens = async () => {
+      const baseUrl = this.env.BASE_URL;
+      // Try to acquire distributed lock; if held, wait and re-read KV.
+      let nonce = await acquireRefreshLock();
+      let attempts = 0;
+      while (!nonce && attempts < 10) {
+        const prevToken = this.props.accessToken;
+        await new Promise(r => setTimeout(r, 300));
+        await loadTokensFromKV();
+        if (this.props.accessToken !== prevToken) return; // tokens actually rotated by another DO
+        nonce = await acquireRefreshLock();
+        attempts++;
+      }
+      if (!nonce) throw new Error("Refresh lock timeout");
+
+      try {
+        // Re-read KV inside lock — another DO may have rotated just before.
+        await loadTokensFromKV();
+        const refreshed = await mgFetch("/auth/refresh", {
+          method: "POST", baseUrl,
+          body: { refreshToken: this.props.refreshToken },
+        });
+        this.props.accessToken = refreshed.access_token;
+        this.props.refreshToken = refreshed.refresh_token;
+        await saveTokensToKV(refreshed.access_token, refreshed.refresh_token);
+      } finally {
+        await releaseRefreshLock(nonce);
+      }
+    };
 
     const apiCall = async (method, path, body = null) => {
       const baseUrl = this.env.BASE_URL;
@@ -55,33 +116,29 @@ export class MavenGangMCP extends McpAgent {
         });
       } catch (err) {
         if (err.status !== 401) throw err;
+
         if (!refreshPromise) {
-          refreshPromise = (async () => {
-            const refreshed = await mgFetch("/auth/refresh", {
-              method: "POST", baseUrl,
-              body: { refreshToken: this.props.refreshToken },
-            });
-            this.props.accessToken = refreshed.access_token;
-            this.props.refreshToken = refreshed.refresh_token;
-
-            const userKey = this.props.email || "unknown";
-            await this.env.OAUTH_KV.put(`tokens:${userKey}`, JSON.stringify({
-              accessToken: refreshed.access_token,
-              refreshToken: refreshed.refresh_token,
-            }), { expirationTtl: 604800 }); // 7 days - matches typical refresh token TTL
-
-            return refreshed;
-          })();
+          refreshPromise = refreshTokens().finally(() => { refreshPromise = null; });
         }
         try {
           await refreshPromise;
         } catch (refreshErr) {
-          refreshPromise = null;
-          const error = new Error("Session expired. Please re-authenticate.");
-          error.status = 401;
-          throw error;
+          const isAuthFailure = refreshErr.status === 401 || refreshErr.status === 403;
+          console.error("Token refresh failed", {
+            userKey,
+            isAuthFailure,
+            status: refreshErr.status,
+            code: refreshErr.data?.code,
+            message: refreshErr.data?.message || refreshErr.message,
+          });
+          if (isAuthFailure) {
+            // Only wipe tokens on genuine auth rejection — not transient errors or lock timeouts.
+            await this.env.OAUTH_KV.delete(tokensKey);
+            const error = new Error(`Session expired (${refreshErr.data?.code || refreshErr.status}). Please re-authenticate.`);
+            throw error;
+          }
+          throw new Error(`Token refresh temporarily failed (${refreshErr.message}). Retry the request.`);
         }
-        refreshPromise = null;
         return await mgFetch(path, {
           method, body, baseUrl,
           headers: authHeaders(this.props.accessToken),
@@ -130,7 +187,7 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_tasks",
-      "List tasks in a project. Filter by status, assignee, milestone. Pass parentId to get subtasks. Set topLevelOnly=false to get all tasks.",
+      "List tasks in a project. Filter by status, assignee, milestone. Pass parentId to get subtasks. Set topLevelOnly=false to get all tasks. IMPORTANT: use `id_for_api` (UUID) for all API operations (taskId, parentId, etc). `taskNumber_display_only` (e.g. PRJ8-5) is for display only and will cause 400 errors if used as an ID.",
       {
         projectId: z.string(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
@@ -153,12 +210,15 @@ export class MavenGangMCP extends McpAgent {
         const q = params.toString() ? "?" + params.toString() : "";
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks${q}`);
         const tasks = (res.items || []).map(t => ({
-          id: t.id, taskNumber: t.task_number, title: t.title,
+          id_for_api: t.id,
+          taskNumber_display_only: t.task_number,
+          title: t.title,
           description: t.description || "",
           status: t.status_name || t.status, priority: t.priority,
           assignedTo: t.assigned_user
             ? `${t.assigned_user.first_name} ${t.assigned_user.last_name}`
             : "Unassigned",
+          parent_id: t.parent_id || null,
           isSubtask: !!t.parent_id, dueDate: t.due_date,
         }));
         return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
@@ -177,12 +237,12 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "create_task",
-      "Create a new task or subtask. Pass null to clear optional fields.",
+      "Create a new task or subtask. To create a subtask pass parentId = the UUID `id` field of the parent task (NOT the display task_number like 'PRJ8-5'). Get the UUID from list_tasks or get_task first.",
       {
         projectId: z.string(),
         title: z.string(),
         description: z.string().nullable().optional(),
-        parentId: z.string().nullable().optional(),
+        parentId: z.string().nullable().optional().describe("UUID id of parent task. Must be the id field (UUID), NOT the display taskNumber like 'PRJ8-5'."),
         milestoneId: z.string().nullable().optional(),
         assignedUserId: z.string().nullable().optional(),
         priority: z.number().optional(),
@@ -207,7 +267,7 @@ export class MavenGangMCP extends McpAgent {
         return {
           content: [{
             type: "text",
-            text: `Task created: ${task.task_number} - "${task.title}"\nStatus: ${task.status_name}\nAssigned: ${task.assigned_user?.first_name || "Unassigned"}`,
+            text: `Task created: ${task.task_number} - "${task.title}"\nid (UUID for API calls, parentId, etc): ${task.id}\nStatus: ${task.status_name}\nAssigned: ${task.assigned_user?.first_name || "Unassigned"}\nparent_id: ${task.parent_id || "none (top-level task)"}`,
           }],
         };
       }
@@ -215,10 +275,10 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "update_task",
-      "Update task status, assignee, priority, title, description, milestone, or due date. Pass null to clear optional fields.",
+      "Update task status, assignee, priority, title, description, milestone, or due date. Pass null to clear optional fields. taskId must be the UUID `id_for_api` field, NOT the display taskNumber like 'PRJ8-5'.",
       {
         projectId: z.string(),
-        taskId: z.string(),
+        taskId: z.string().describe("UUID id of the task (id_for_api from list_tasks). NOT the display taskNumber like 'PRJ8-5'."),
         title: z.string().nullable().optional(),
         description: z.string().nullable().optional(),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
@@ -231,7 +291,7 @@ export class MavenGangMCP extends McpAgent {
         const body = {};
         if (title !== undefined) body.title = title;
         if (description !== undefined) body.description = description;
-        if (status) body.status = status;
+        if (status !== undefined) body.status = status;
         if (assignedUserId !== undefined) body.assigned_user_id = assignedUserId;
         if (milestoneId !== undefined) body.milestone_id = milestoneId;
         if (priority !== undefined) body.priority = priority;
@@ -283,7 +343,9 @@ export class MavenGangMCP extends McpAgent {
         const q = params.toString() ? "?" + params.toString() : "";
         const res = await apiCall("GET", `/agencies/${agencyId()}/my-tasks${q}`);
         const tasks = (res.items || []).map(t => ({
-          id: t.id, taskNumber: t.task_number, title: t.title,
+          id_for_api: t.id,
+          taskNumber_display_only: t.task_number,
+          title: t.title,
           status: t.status_name || t.status, priority: t.priority,
           dueDate: t.due_date, projectId: t.project_id, projectName: t.project_name,
         }));
@@ -293,9 +355,9 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "add_comment",
-      "Add a comment to a task",
+      "Add a comment to a task. taskId must be the UUID id_for_api from list_tasks, NOT the display taskNumber like 'PRJ8-5'.",
       {
-        taskId: z.string(),
+        taskId: z.string().describe("UUID id of the task (id_for_api). NOT the display taskNumber like 'PRJ8-5'."),
         content: z.string(),
         parentId: z.string().optional(),
       },
@@ -313,8 +375,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_comments",
-      "List comments on a task",
-      { taskId: z.string() },
+      "List comments on a task. taskId must be the UUID id_for_api from list_tasks, NOT the display taskNumber like 'PRJ8-5'.",
+      { taskId: z.string().describe("UUID id of the task (id_for_api). NOT the display taskNumber like 'PRJ8-5'.") },
       async ({ taskId }) => {
         const res = await apiCall(
           "GET",
@@ -333,8 +395,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "delete_task",
-      "Delete a task from a project",
-      { projectId: z.string(), taskId: z.string() },
+      "Delete a task from a project. taskId must be the UUID `id_for_api` from list_tasks, NOT the display taskNumber like 'PRJ8-5'.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id of the task (id_for_api from list_tasks). NOT the display taskNumber.") },
       async ({ projectId, taskId }) => {
         await apiCall("DELETE", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`);
         return { content: [{ type: "text", text: `Task ${taskId} deleted successfully.` }] };
@@ -711,10 +773,10 @@ export class MavenGangMCP extends McpAgent {
     // §7 Bulk Tasks
     this.server.tool(
       "bulk_update_tasks",
-      "Update multiple tasks at once",
+      "Update multiple tasks at once. taskIds must be UUID id_for_api values from list_tasks, NOT display taskNumbers like 'PRJ8-5'.",
       {
         projectId: z.string(),
-        taskIds: z.array(z.string()).min(1),
+        taskIds: z.array(z.string()).min(1).describe("Array of UUID id_for_api values. NOT display taskNumbers."),
         status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
         assignedUserId: z.string().nullable().optional(),
         milestoneId: z.string().nullable().optional(),
@@ -734,8 +796,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "bulk_delete_tasks",
-      "Delete multiple tasks",
-      { projectId: z.string(), taskIds: z.array(z.string()).min(1) },
+      "Delete multiple tasks. taskIds must be UUID id_for_api values from list_tasks, NOT display taskNumbers like 'PRJ8-5'.",
+      { projectId: z.string(), taskIds: z.array(z.string()).min(1).describe("Array of UUID id_for_api values. NOT display taskNumbers.") },
       async ({ projectId, taskIds }) => {
         const res = await apiCall("POST", `/agencies/${agencyId()}/projects/${projectId}/tasks/bulk-delete`, { task_ids: taskIds });
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
@@ -745,8 +807,8 @@ export class MavenGangMCP extends McpAgent {
     // §7b Task Watchers
     this.server.tool(
       "list_task_watchers",
-      "List watchers of a task",
-      { projectId: z.string(), taskId: z.string() },
+      "List watchers of a task. taskId must be UUID id_for_api, NOT display taskNumber.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'.") },
       async ({ projectId, taskId }) => {
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/watchers`);
         const watchers = (res.items || []).map(w => ({ userId: w.user_id, firstName: w.first_name, lastName: w.last_name }));
@@ -756,8 +818,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "add_task_watcher",
-      "Add a watcher to a task",
-      { projectId: z.string(), taskId: z.string(), userId: z.string() },
+      "Add a watcher to a task. taskId must be UUID id_for_api, NOT display taskNumber.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'."), userId: z.string() },
       async ({ projectId, taskId, userId }) => {
         const res = await apiCall("POST", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/watchers`, { user_id: userId });
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
@@ -766,8 +828,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "remove_task_watcher",
-      "Remove a watcher from a task",
-      { projectId: z.string(), taskId: z.string(), userId: z.string() },
+      "Remove a watcher from a task. taskId must be UUID id_for_api, NOT display taskNumber.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'."), userId: z.string() },
       async ({ projectId, taskId, userId }) => {
         await apiCall("DELETE", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/watchers/${userId}`);
         return { content: [{ type: "text", text: "Watcher removed." }] };
@@ -777,8 +839,8 @@ export class MavenGangMCP extends McpAgent {
     // §7c Task Dependencies
     this.server.tool(
       "list_task_dependencies",
-      "List dependencies of a task",
-      { projectId: z.string(), taskId: z.string() },
+      "List dependencies of a task. taskId must be UUID id_for_api, NOT display taskNumber.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'.") },
       async ({ projectId, taskId }) => {
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/dependencies`);
         const deps = (res.items || []).map(d => ({ id: d.id, dependsOnTaskId: d.depends_on_task_id, title: d.depends_on_task?.title }));
@@ -788,8 +850,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "add_task_dependency",
-      "Add a dependency to a task",
-      { projectId: z.string(), taskId: z.string(), dependsOnTaskId: z.string() },
+      "Add a dependency to a task. Both taskId and dependsOnTaskId must be UUID id_for_api, NOT display taskNumbers.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber."), dependsOnTaskId: z.string().describe("UUID id_for_api of the task this depends on. NOT display taskNumber.") },
       async ({ projectId, taskId, dependsOnTaskId }) => {
         const res = await apiCall("POST", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/dependencies`, { depends_on_task_id: dependsOnTaskId });
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
@@ -798,8 +860,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "remove_task_dependency",
-      "Remove a dependency from a task",
-      { projectId: z.string(), taskId: z.string(), dependencyId: z.string() },
+      "Remove a dependency from a task. taskId must be UUID id_for_api, NOT display taskNumber. dependencyId is the dependency record UUID from list_task_dependencies.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber."), dependencyId: z.string().describe("UUID of the dependency record (id from list_task_dependencies).") },
       async ({ projectId, taskId, dependencyId }) => {
         await apiCall("DELETE", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/dependencies/${dependencyId}`);
         return { content: [{ type: "text", text: "Dependency removed." }] };
@@ -809,10 +871,10 @@ export class MavenGangMCP extends McpAgent {
     // §7d Task Recurrence
     this.server.tool(
       "set_task_recurrence",
-      "Set recurrence on a task",
+      "Set recurrence on a task. taskId must be UUID id_for_api, NOT display taskNumber.",
       {
         projectId: z.string(),
-        taskId: z.string(),
+        taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'."),
         frequency: z.enum(["daily", "weekly", "monthly"]),
         interval: z.number(),
         endDate: z.string().nullable().optional(),
@@ -829,10 +891,10 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "update_task_recurrence",
-      "Update recurrence on a task",
+      "Update recurrence on a task. taskId must be UUID id_for_api, NOT display taskNumber.",
       {
         projectId: z.string(),
-        taskId: z.string(),
+        taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'."),
         frequency: z.enum(["daily", "weekly", "monthly"]).optional(),
         interval: z.number().optional(),
         endDate: z.string().nullable().optional(),
@@ -854,8 +916,8 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "delete_task_recurrence",
-      "Remove recurrence from a task",
-      { projectId: z.string(), taskId: z.string() },
+      "Remove recurrence from a task. taskId must be UUID id_for_api, NOT display taskNumber.",
+      { projectId: z.string(), taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'.") },
       async ({ projectId, taskId }) => {
         await apiCall("DELETE", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}/recurrence`);
         return { content: [{ type: "text", text: "Recurrence removed." }] };
@@ -864,10 +926,10 @@ export class MavenGangMCP extends McpAgent {
 
     this.server.tool(
       "list_task_occurrences",
-      "List occurrences of a recurring task",
+      "List occurrences of a recurring task. taskId must be UUID id_for_api, NOT display taskNumber.",
       {
         projectId: z.string(),
-        taskId: z.string(),
+        taskId: z.string().describe("UUID id_for_api. NOT display taskNumber like 'PRJ8-5'."),
         limit: z.number().min(1).max(100).optional(),
         cursor: z.string().optional(),
       },
@@ -1039,7 +1101,7 @@ export class MavenGangMCP extends McpAgent {
       "Start a time timer",
       {
         projectId: z.string(),
-        taskId: z.string().nullable().optional(),
+        taskId: z.string().nullable().optional().describe("UUID id_for_api of the task. NOT display taskNumber."),
         note: z.string().optional(),
         isBillable: z.boolean().optional(),
       },
@@ -1091,7 +1153,7 @@ export class MavenGangMCP extends McpAgent {
         startTime: z.string(),
         endTime: z.string().nullable().optional(),
         durationMinutes: z.number().optional(),
-        taskId: z.string().nullable().optional(),
+        taskId: z.string().nullable().optional().describe("UUID id_for_api of the task. NOT display taskNumber."),
         note: z.string().optional(),
         isBillable: z.boolean().optional(),
         tagIds: z.array(z.string()).optional(),
@@ -1119,7 +1181,7 @@ export class MavenGangMCP extends McpAgent {
       "List time entries",
       {
         projectId: z.string().optional(),
-        taskId: z.string().optional(),
+        taskId: z.string().optional().describe("UUID id_for_api of the task to filter by. NOT display taskNumber."),
         userId: z.string().optional(),
         fromDate: z.string().optional(),
         toDate: z.string().optional(),
@@ -2168,6 +2230,7 @@ const loginHandler = {
       if (request.method === "GET") {
         const codeChallenge = url.searchParams.get("code_challenge") || "";
         const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "S256";
+        const clientState = url.searchParams.get("state") || "";
 
         let clientName = "your IDE";
         if (clientId) {
@@ -2185,6 +2248,7 @@ const loginHandler = {
           responseType,
           codeChallenge: codeChallenge || undefined,
           codeChallengeMethod: codeChallengeMethod || "S256",
+          state: clientState || undefined,
         };
 
         await env.OAUTH_KV.put(`oauth_state:${stateId}`, JSON.stringify(oauthReq), { expirationTtl: 600 });
@@ -2281,5 +2345,5 @@ export default new OAuthProvider({
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
   clientRegistrationEndpoint: "/register",
-  accessTokenTTL: 3600,
+  accessTokenTTL: 2592000,
 });

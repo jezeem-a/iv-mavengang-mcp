@@ -67,7 +67,7 @@ export class MavenGangMCP extends McpAgent {
       const nonce = crypto.randomUUID();
       const existing = await this.env.OAUTH_KV.get(lockKey);
       if (existing) return null;
-      await this.env.OAUTH_KV.put(lockKey, nonce, { expirationTtl: 15 });
+      await this.env.OAUTH_KV.put(lockKey, nonce, { expirationTtl: 60 });
       const check = await this.env.OAUTH_KV.get(lockKey);
       return check === nonce ? nonce : null;
     };

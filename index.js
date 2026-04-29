@@ -249,7 +249,7 @@ export class MavenGangMCP extends McpAgent {
         dueDate: z.string().nullable().optional(),
         startDate: z.string().nullable().optional(),
         estimatedHours: z.number().optional(),
-        status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
+        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
       },
       async ({ projectId, title, description, parentId, milestoneId, assignedUserId, priority, dueDate, startDate, estimatedHours, status }) => {
         const body = { title };
@@ -281,7 +281,7 @@ export class MavenGangMCP extends McpAgent {
         taskId: z.string().describe("UUID id of the task (id_for_api from list_tasks). NOT the display taskNumber like 'PRJ8-5'."),
         title: z.string().nullable().optional(),
         description: z.string().nullable().optional(),
-        status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
+        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
         assignedUserId: z.string().nullable().optional(),
         milestoneId: z.string().nullable().optional(),
         priority: z.number().optional(),
@@ -777,7 +777,7 @@ export class MavenGangMCP extends McpAgent {
       {
         projectId: z.string(),
         taskIds: z.array(z.string()).min(1).describe("Array of UUID id_for_api values. NOT display taskNumbers."),
-        status: z.enum(["todo", "in_progress", "in_qa", "done"]).optional(),
+        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
         assignedUserId: z.string().nullable().optional(),
         milestoneId: z.string().nullable().optional(),
       },

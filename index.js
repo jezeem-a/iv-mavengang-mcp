@@ -134,7 +134,7 @@ export class MavenGangMCP extends McpAgent {
           if (isAuthFailure) {
             // Only wipe tokens on genuine auth rejection — not transient errors or lock timeouts.
             await this.env.OAUTH_KV.delete(tokensKey);
-            const error = new Error(`Session expired (${refreshErr.data?.code || refreshErr.status}). Please re-authenticate.`);
+            const error = new Error(`Session expired (${refreshErr.data?.code || refreshErr.status}). Re-authenticate at: https://iv-mavengang-mcp.jezeem-dev.workers.dev/reauth (takes 10 seconds, fixes all IDE clients).`);
             throw error;
           }
           throw new Error(`Token refresh temporarily failed (${refreshErr.message}). Retry the request.`);
@@ -2211,6 +2211,57 @@ const loginPageHtml = (errorMsg = "", clientName = "your IDE") => `<!DOCTYPE htm
 </form>
 </body></html>`;
 
+const reauthPageHtml = (errorMsg = "") => `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Re-authenticate — MavenGang MCP</title>
+<style>
+  body{font-family:-apple-system,sans-serif;background:#f5f5f5;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;margin:0}
+  .card{background:#fff;padding:2rem;border-radius:8px;max-width:400px;width:90%;
+        box-shadow:0 2px 8px rgba(0,0,0,.1)}
+  h1{margin:0 0 .5rem;font-size:1.25rem}
+  p.sub{color:#666;margin:0 0 1.5rem;font-size:.9rem}
+  input{width:100%;padding:.75rem;border:1px solid #ddd;border-radius:4px;
+        margin-bottom:1rem;font-size:1rem;box-sizing:border-box}
+  button{width:100%;padding:.75rem;background:#007bff;color:#fff;border:0;
+         border-radius:4px;font-size:1rem;cursor:pointer}
+  .err{background:#fee;color:#c00;padding:.75rem;border-radius:4px;margin-bottom:1rem}
+  .ok{background:#efe;color:#060;padding:.75rem;border-radius:4px;margin-bottom:1rem}
+</style></head><body>
+<form class="card" method="POST" action="/reauth">
+  <h1>Re-authenticate MavenGang MCP</h1>
+  <p class="sub">Your MCP session expired. Sign in to refresh tokens for all IDE clients simultaneously.</p>
+  ${errorMsg ? `<div class="err">${htmlEscape(errorMsg)}</div>` : ""}
+  <input name="email" type="email" placeholder="Email" required autofocus>
+  <input name="password" type="password" placeholder="Password" required>
+  <button type="submit">Re-authenticate</button>
+</form>
+</body></html>`;
+
+const reauthSuccessHtml = (email) => `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Done — MavenGang MCP</title>
+<style>
+  body{font-family:-apple-system,sans-serif;background:#f5f5f5;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;margin:0}
+  .card{background:#fff;padding:2rem;border-radius:8px;max-width:400px;width:90%;
+        box-shadow:0 2px 8px rgba(0,0,0,.1);text-align:center}
+  h1{margin:0 0 .5rem;font-size:1.25rem;color:#060}
+  p{color:#444;margin:.5rem 0;font-size:.95rem}
+  .em{font-weight:bold}
+</style></head><body>
+<div class="card">
+  <h1>✓ Done</h1>
+  <p>Tokens refreshed for <span class="em">${htmlEscape(email)}</span>.</p>
+  <p>All IDE MCP clients (Claude, Windsurf, OpenCode, Cursor) are now re-authenticated.</p>
+  <p style="color:#888;font-size:.85rem;margin-top:1rem">You can close this tab.</p>
+</div>
+</body></html>`;
+
 const loginHandler = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -2219,6 +2270,39 @@ const loginHandler = {
       return new Response(JSON.stringify({ status: "ok", service: "iv-mavengang-mcp" }), {
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    if (url.pathname === "/reauth" && request.method === "GET") {
+      return new Response(reauthPageHtml(""), { headers: { "Content-Type": "text/html" } });
+    }
+
+    if (url.pathname === "/reauth" && request.method === "POST") {
+      const form = await request.formData();
+      const email = (form.get("email") || "").trim();
+      const password = form.get("password") || "";
+      if (!email || !password) {
+        return new Response(reauthPageHtml("Email and password required."), {
+          status: 400, headers: { "Content-Type": "text/html" },
+        });
+      }
+      try {
+        const loginRes = await mgFetch("/auth/login", {
+          method: "POST", baseUrl: env.BASE_URL,
+          body: { email, password },
+        });
+        await env.OAUTH_KV.put(`tokens:${email}`, JSON.stringify({
+          accessToken: loginRes.access_token,
+          refreshToken: loginRes.refresh_token,
+        }), { expirationTtl: 604800 }); // 7 days
+        return new Response(reauthSuccessHtml(email), { headers: { "Content-Type": "text/html" } });
+      } catch (err) {
+        const msg = err.status === 401 || err.status === 403
+          ? "Wrong email or password."
+          : `Login failed: ${err.message}`;
+        return new Response(reauthPageHtml(msg), {
+          status: 400, headers: { "Content-Type": "text/html" },
+        });
+      }
     }
 
     if (url.pathname === "/authorize") {

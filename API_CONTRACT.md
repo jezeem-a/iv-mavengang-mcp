@@ -1063,6 +1063,7 @@ Request:
 {
   "project_id": "cuid",
   "task_id": "cuid | null",
+  "date": "YYYY-MM-DD",
   "start_time": "iso",
   "end_time": "iso | null",
   "duration_minutes": 0,
@@ -1076,6 +1077,7 @@ Request:
 Rules:
 * `user_id` only allowed for admin/manager (track as another user)
 * Either `end_time` or `duration_minutes` required
+* `date` required (verified 2026-07-15 — API returns `VALIDATION_ERROR: date must be a valid ISO 8601 date string` without it)
 
 ---
 

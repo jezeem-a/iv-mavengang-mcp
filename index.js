@@ -1150,20 +1150,21 @@ export class MavenGangMCP extends McpAgent {
       "Log time entry manually",
       {
         projectId: z.string(),
-        startTime: z.string(),
+        startTime: z.string().describe("Full ISO 8601 datetime, e.g. 2026-07-15T09:00:00Z"),
         endTime: z.string().nullable().optional(),
         durationMinutes: z.number().optional(),
+        date: z.string().optional().describe("Entry date, YYYY-MM-DD. Defaults to the date portion of startTime."),
         taskId: z.string().nullable().optional().describe("UUID id_for_api of the task. NOT display taskNumber."),
         note: z.string().optional(),
         isBillable: z.boolean().optional(),
         tagIds: z.array(z.string()).optional(),
         userId: z.string().nullable().optional(),
       },
-      async ({ projectId, startTime, endTime, durationMinutes, taskId, note, isBillable, tagIds, userId }) => {
+      async ({ projectId, startTime, endTime, durationMinutes, date, taskId, note, isBillable, tagIds, userId }) => {
         if (!endTime && !durationMinutes) {
           return { content: [{ type: "text", text: "Either endTime or durationMinutes is required." }] };
         }
-        const body = { project_id: projectId, start_time: startTime };
+        const body = { project_id: projectId, start_time: startTime, date: date || startTime.slice(0, 10) };
         if (endTime !== undefined) body.end_time = endTime;
         if (durationMinutes !== undefined) body.duration_minutes = durationMinutes;
         if (taskId !== undefined) body.task_id = taskId;
@@ -1227,13 +1228,16 @@ export class MavenGangMCP extends McpAgent {
         startTime: z.string().optional(),
         endTime: z.string().nullable().optional(),
         durationMinutes: z.number().optional(),
+        date: z.string().optional().describe("Entry date, YYYY-MM-DD. Defaults to the date portion of startTime when startTime is provided."),
         tagIds: z.array(z.string()).optional(),
       },
-      async ({ timeEntryId, note, isBillable, startTime, endTime, durationMinutes, tagIds }) => {
+      async ({ timeEntryId, note, isBillable, startTime, endTime, durationMinutes, date, tagIds }) => {
         const body = {};
         if (note !== undefined) body.note = note;
         if (isBillable !== undefined) body.is_billable = isBillable;
         if (startTime !== undefined) body.start_time = startTime;
+        if (date !== undefined) body.date = date;
+        else if (startTime !== undefined) body.date = startTime.slice(0, 10);
         if (endTime !== undefined) body.end_time = endTime;
         if (durationMinutes !== undefined) body.duration_minutes = durationMinutes;
         if (tagIds !== undefined) body.tag_ids = tagIds;

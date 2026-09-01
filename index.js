@@ -148,6 +148,48 @@ export class MavenGangMCP extends McpAgent {
 
     const agencyId = () => this.props.agencyId;
 
+    // --- Task status resolution -------------------------------------------
+    // The API matches task `status` by status-definition SLUG only, and on
+    // update it silently leaves the real status (FK) unchanged when the slug
+    // doesn't match — while still echoing the sent value back in the legacy
+    // `status` field. So: resolve whatever the caller passes (UUID, slug,
+    // name, or todo/in_progress-style enum) to the project's actual slug
+    // before sending, and verify against FK-driven fields afterwards.
+    const STATUS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const normStatus = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    const resolveTaskStatus = async (projectId, input) => {
+      let defs = (await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/task-statuses`)).items || [];
+      if (defs.length === 0) {
+        defs = (await apiCall("GET", `/agencies/${agencyId()}/task-statuses`)).items || [];
+      }
+      const wanted = normStatus(input);
+      const match = STATUS_UUID_RE.test(String(input))
+        ? defs.find(d => String(d.id).toLowerCase() === String(input).toLowerCase())
+        : defs.find(d => normStatus(d.slug) === wanted) || defs.find(d => normStatus(d.name) === wanted);
+      if (!match) {
+        const valid = defs.map(d => `"${d.name}" (slug: ${d.slug}, id: ${d.id})`).join("; ");
+        throw new Error(`Unknown status "${input}" for this project. Valid statuses: ${valid || "none defined"}. Use list_project_task_statuses to inspect them.`);
+      }
+      return match;
+    };
+
+    // Confirm the status actually changed. Never trust the legacy `status`
+    // field — it echoes whatever was sent even when the update fails open.
+    const verifyTaskStatus = async (projectId, taskId, expectedDef, candidate = null) => {
+      let t = candidate?.task || candidate;
+      if (!t || (t.status_id === undefined && t.status_name === undefined)) {
+        const fresh = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`);
+        t = fresh.task || fresh;
+      }
+      const hasId = t.status_id !== undefined && t.status_id !== null;
+      const idOk = hasId && String(t.status_id).toLowerCase() === String(expectedDef.id).toLowerCase();
+      const nameOk = !hasId && t.status_name && normStatus(t.status_name) === normStatus(expectedDef.name);
+      if (!idOk && !nameOk) {
+        throw new Error(`Status update did NOT apply: requested "${expectedDef.name}" (slug: ${expectedDef.slug}) but the task still reports "${t.status_name || "unknown"}". The API accepted the request but ignored the status value.`);
+      }
+    };
+
     this.server.tool(
       "list_projects",
       "List all projects. Filter by status, client. Search by name.",
@@ -249,7 +291,7 @@ export class MavenGangMCP extends McpAgent {
         dueDate: z.string().nullable().optional(),
         startDate: z.string().nullable().optional(),
         estimatedHours: z.number().optional(),
-        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
+        status: z.string().optional().describe("Status name, slug, or UUID — resolved against the project's own statuses (e.g. 'done', 'In QA', or an id from list_project_task_statuses)."),
       },
       async ({ projectId, title, description, parentId, milestoneId, assignedUserId, priority, dueDate, startDate, estimatedHours, status }) => {
         const body = { title };
@@ -261,7 +303,7 @@ export class MavenGangMCP extends McpAgent {
         if (dueDate !== undefined) body.due_date = dueDate;
         if (startDate !== undefined) body.start_date = startDate;
         if (estimatedHours !== undefined) body.estimated_hours = estimatedHours;
-        if (status) body.status = status;
+        if (status) body.status = (await resolveTaskStatus(projectId, status)).slug;
         const res = await apiCall("POST", `/agencies/${agencyId()}/projects/${projectId}/tasks`, body);
         const task = res.task;
         return {
@@ -281,7 +323,7 @@ export class MavenGangMCP extends McpAgent {
         taskId: z.string().describe("UUID id of the task (id_for_api from list_tasks). NOT the display taskNumber like 'PRJ8-5'."),
         title: z.string().nullable().optional(),
         description: z.string().nullable().optional(),
-        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
+        status: z.string().optional().describe("Status name, slug, or UUID — resolved against the project's own statuses (e.g. 'done', 'In QA', or an id from list_project_task_statuses)."),
         assignedUserId: z.string().nullable().optional(),
         milestoneId: z.string().nullable().optional(),
         priority: z.number().optional(),
@@ -291,7 +333,11 @@ export class MavenGangMCP extends McpAgent {
         const body = {};
         if (title !== undefined) body.title = title;
         if (description !== undefined) body.description = description;
-        if (status !== undefined) body.status = status;
+        let statusDef = null;
+        if (status !== undefined) {
+          statusDef = await resolveTaskStatus(projectId, status);
+          body.status = statusDef.slug;
+        }
         if (assignedUserId !== undefined) body.assigned_user_id = assignedUserId;
         if (milestoneId !== undefined) body.milestone_id = milestoneId;
         if (priority !== undefined) body.priority = priority;
@@ -300,6 +346,7 @@ export class MavenGangMCP extends McpAgent {
           return { content: [{ type: "text", text: "No fields to update. Pass at least one of: title, description, status, assignedUserId, milestoneId, priority, dueDate." }] };
         }
         const res = await apiCall("PATCH", `/agencies/${agencyId()}/projects/${projectId}/tasks/${taskId}`, body);
+        if (statusDef) await verifyTaskStatus(projectId, taskId, statusDef, res);
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
       }
     );
@@ -777,19 +824,25 @@ export class MavenGangMCP extends McpAgent {
       {
         projectId: z.string(),
         taskIds: z.array(z.string()).min(1).describe("Array of UUID id_for_api values. NOT display taskNumbers."),
-        status: z.string().optional().describe("Status UUID from list_project_task_statuses, OR enum: todo, in_progress, in_qa, done. Projects with custom statuses require the UUID."),
+        status: z.string().optional().describe("Status name, slug, or UUID — resolved against the project's own statuses (e.g. 'done', 'In QA', or an id from list_project_task_statuses)."),
         assignedUserId: z.string().nullable().optional(),
         milestoneId: z.string().nullable().optional(),
       },
       async ({ projectId, taskIds, status, assignedUserId, milestoneId }) => {
         const body = { task_ids: taskIds };
-        if (status !== undefined) body.status = status;
+        let statusDef = null;
+        if (status !== undefined) {
+          statusDef = await resolveTaskStatus(projectId, status);
+          body.status = statusDef.slug;
+        }
         if (assignedUserId !== undefined) body.assigned_user_id = assignedUserId;
         if (milestoneId !== undefined) body.milestone_id = milestoneId;
         if (Object.keys(body).length <= 1) {
           return { content: [{ type: "text", text: "No fields to update." }] };
         }
         const res = await apiCall("PATCH", `/agencies/${agencyId()}/projects/${projectId}/tasks/bulk-update`, body);
+        // Spot-check one task — the bulk endpoint shares the fail-open status path.
+        if (statusDef) await verifyTaskStatus(projectId, taskIds[0], statusDef);
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
       }
     );
@@ -2064,7 +2117,7 @@ export class MavenGangMCP extends McpAgent {
       "List agency default task statuses",
       async () => {
         const res = await apiCall("GET", `/agencies/${agencyId()}/task-statuses`);
-        const statuses = (res.items || []).map(s => ({ id: s.id, name: s.name, color: s.color }));
+        const statuses = (res.items || []).map(s => ({ id: s.id, name: s.name, slug: s.slug, color: s.color, is_default: s.is_default, is_completed: s.is_completed }));
         return { content: [{ type: "text", text: JSON.stringify(statuses, null, 2) }] };
       }
     );
@@ -2125,7 +2178,7 @@ export class MavenGangMCP extends McpAgent {
       { projectId: z.string() },
       async ({ projectId }) => {
         const res = await apiCall("GET", `/agencies/${agencyId()}/projects/${projectId}/task-statuses`);
-        const statuses = (res.items || []).map(s => ({ id: s.id, name: s.name, color: s.color }));
+        const statuses = (res.items || []).map(s => ({ id: s.id, name: s.name, slug: s.slug, color: s.color, is_default: s.is_default, is_completed: s.is_completed }));
         return { content: [{ type: "text", text: JSON.stringify(statuses, null, 2) }] };
       }
     );

@@ -223,7 +223,7 @@ Request:
 
 ```json
 {
-  "refreshToken": "string"
+  "refresh_token": "string"
 }
 ```
 

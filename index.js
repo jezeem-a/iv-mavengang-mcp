@@ -97,7 +97,7 @@ export class MavenGangMCP extends McpAgent {
         await loadTokensFromKV();
         const refreshed = await mgFetch("/auth/refresh", {
           method: "POST", baseUrl,
-          body: { refreshToken: this.props.refreshToken },
+          body: { refresh_token: this.props.refreshToken },
         });
         this.props.accessToken = refreshed.access_token;
         this.props.refreshToken = refreshed.refresh_token;

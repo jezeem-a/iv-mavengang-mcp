@@ -406,15 +406,16 @@ export class MavenGangMCP extends McpAgent {
       {
         taskId: z.string().describe("UUID id of the task (id_for_api). NOT the display taskNumber like 'PRJ8-5'."),
         content: z.string(),
-        parentId: z.string().optional(),
+        attachmentIds: z.array(z.string()).max(10).optional().describe("UUIDs of already-uploaded attachments to link (max 10)."),
       },
-      async ({ taskId, content, parentId }) => {
+      async ({ taskId, content, attachmentIds }) => {
+        // Backend rejects unknown fields (forbidNonWhitelisted) and comments are flat — no parent_id.
         const body = {
           entity_type: "task",
           entity_id: taskId,
           content,
-          parent_id: parentId || null,
         };
+        if (attachmentIds?.length) body.attachment_ids = attachmentIds;
         const res = await apiCall("POST", `/agencies/${agencyId()}/comments`, body);
         return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
       }
@@ -429,12 +430,19 @@ export class MavenGangMCP extends McpAgent {
           "GET",
           `/agencies/${agencyId()}/comments?entity_type=task&entity_id=${encodeURIComponent(taskId)}`
         );
+        // Backend only returns author_user_id; resolve names via members (best-effort).
+        const names = {};
+        try {
+          const members = await apiCall("GET", `/agencies/${agencyId()}/members?limit=100`);
+          for (const m of members.items || []) names[m.user_id] = m.name;
+        } catch {}
         const comments = (res.items || []).map(c => ({
           id: c.id,
           content: c.content,
-          author: c.author ? `${c.author.first_name} ${c.author.last_name}` : "Unknown",
+          authorUserId: c.author_user_id,
+          author: names[c.author_user_id] || "Unknown",
           createdAt: c.created_at,
-          parentId: c.parent_id,
+          updatedAt: c.updated_at,
         }));
         return { content: [{ type: "text", text: JSON.stringify(comments, null, 2) }] };
       }
